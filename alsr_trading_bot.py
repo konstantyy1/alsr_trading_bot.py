@@ -1,28 +1,36 @@
 import logging
 import os
+import threading
 from datetime import datetime, time
 import pytz
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- НАЛАШТУВАННЯ ---
+# --- FLASK ДЛЯ RENDER (Щоб сервіс не засинав) ---
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "ALSR Trading Bot is running 24/7!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app_flask.run(host="0.0.0.0", port=port)
+
+# --- НАЛАШТУВАННЯ БОТА ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TARGET_USERNAME = "@konstantyy1"
-
-# Налаштування часового поясу (Познань / Europe/Warsaw)
 TIMEZONE = pytz.timezone("Europe/Warsaw")
 
-# Налаштування логування
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# --- ГЕНЕРАТОР ТОРГОВИХ СИГНАЛІВ (ALSR INTRADAY) ---
 def generate_signal(session_name: str) -> str:
     now = datetime.now(TIMEZONE).strftime("%d.%m.%Y")
-    
-    signal_msg = (
+    return (
         f"🚨 <b>ALSR INTRADAY SIGNAL — EUR/USD</b> 🚨\n"
         f"📅 <b>Дата:</b> {now}\n"
         f"⏰ <b>Сесія:</b> {session_name}\n"
@@ -36,9 +44,7 @@ def generate_signal(session_name: str) -> str:
         f"🛡 <b>Ризик на угоду:</b> 0.35% ($35 на $10k FTMO)\n"
         f"⚠️ <b>Правило дня:</b> Максимум 2 стоп-лоси на день! Якщо TP1 взято — SL в BU."
     )
-    return signal_msg
 
-# --- КОМАНДИ БОТА ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
@@ -46,7 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_html(
         f"Вітаю, {user.mention_html()}!\n\n"
-        f"🤖 <b>ALSR Signals Bot</b> успішно активовано.\n"
+        f"🤖 <b>ALSR Signals Bot</b> успішно активовано у хмарі Render.\n"
         f"Ви підключені до системи сповіщень для акаунта <b>{TARGET_USERNAME}</b>.\n\n"
         f"⏰ <b>Розклад сигналів (Час Poznań):</b>\n"
         f"• <b>London Session:</b> 09:30\n"
@@ -58,7 +64,6 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     signal = generate_signal("Test Session (Ручна перевірка)")
     await update.message.reply_html(signal)
 
-# --- АВТОМАТИЧНІ ТАЙМЕРИ СИГНАЛІВ ---
 async def send_london_signal(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.bot_data.get("user_chat_id")
     if chat_id:
@@ -72,26 +77,22 @@ async def send_ny_signal(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=signal, parse_mode="HTML")
 
 def main():
+    # Запускаємо веб-сервер у фоновому потоці для Render
+    t = threading.Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+    # Запускаємо Telegram бота
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("test_signal", test_signal))
 
     job_queue = app.job_queue
-    
-    job_queue.run_daily(
-        send_london_signal,
-        time=time(hour=9, minute=30, tzinfo=TIMEZONE),
-        days=(1, 2, 3, 4, 5)
-    )
-    
-    job_queue.run_daily(
-        send_ny_signal,
-        time=time(hour=14, minute=30, tzinfo=TIMEZONE),
-        days=(1, 2, 3, 4, 5)
-    )
+    job_queue.run_daily(send_london_signal, time=time(hour=9, minute=30, tzinfo=TIMEZONE), days=(1, 2, 3, 4, 5))
+    job_queue.run_daily(send_ny_signal, time=time(hour=14, minute=30, tzinfo=TIMEZONE), days=(1, 2, 3, 4, 5))
 
-    print("🤖 Бот успішно запущений у хмарі та працює 24/7!")
+    print("🤖 Бот та веб-сервер успішно запущені!")
     app.run_polling()
 
 if __name__ == "__main__":
