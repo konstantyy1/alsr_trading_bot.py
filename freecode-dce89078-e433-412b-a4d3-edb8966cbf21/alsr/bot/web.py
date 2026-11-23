@@ -48,8 +48,10 @@ def get_store() -> Store:
 
 
 # --------------------------------------------------------------------------- auth
-def _wire_token() -> str:
-    return ENV.dashboard_token or ENV.scan_token
+def _valid_tokens() -> list[str]:
+    """Any configured token is accepted. The dashboard token and the scan token are
+    separate on purpose: a scheduler should not need the password to the terminal."""
+    return [t for t in (ENV.dashboard_token, ENV.scan_token) if t]
 
 
 def _parse_cookies(environ) -> dict:
@@ -76,7 +78,7 @@ def _bearer(environ) -> str:
 
 
 def _authorized(environ, query: dict) -> bool:
-    expected = _wire_token()
+    expected = _valid_tokens()
     if not expected:
         return False
     candidates = [
@@ -85,7 +87,7 @@ def _authorized(environ, query: dict) -> bool:
         _parse_cookies(environ).get(COOKIE_NAME, ""),
         environ.get("HTTP_X_SCAN_TOKEN", ""),
     ]
-    return any(_secure_eq(c, expected) for c in candidates)
+    return any(_secure_eq(c, e) for c in candidates for e in expected)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -155,7 +157,7 @@ def route_root(environ, start_response):
     query = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
     headers = []
     token = (query.get("token") or [""])[0]
-    if _secure_eq(token, _wire_token()):
+    if any(_secure_eq(token, e) for e in _valid_tokens()):
         headers.append((
             "Set-Cookie",
             f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000; Secure",

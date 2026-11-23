@@ -474,6 +474,38 @@ def test_calendar_xml_fallback() -> tuple[bool, str]:
     return ok, note
 
 
+def test_scan_token_accepted() -> tuple[bool, str]:
+    """The scheduler token must work even when a dashboard token exists.
+
+    Auth used to check only `DASHBOARD_TOKEN or SCAN_TOKEN`, so as soon as the
+    dashboard token was set the scan token silently stopped working and cron could
+    never trigger a run.
+    """
+    import importlib
+    import os
+
+    os.environ["DASHBOARD_TOKEN"] = "dash-token-test"
+    os.environ["SCAN_TOKEN"] = "scan-token-test"
+    import config
+    import web
+
+    importlib.reload(config)
+    importlib.reload(web)
+
+    def status_for(token):
+        env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/status", "QUERY_STRING": "",
+               "HTTP_AUTHORIZATION": f"Bearer {token}" if token else ""}
+        out = {}
+        web.application(env, lambda s, h: out.update(s=s))
+        return out.get("s", "")
+
+    dash = status_for("dash-token-test")
+    scan = status_for("scan-token-test")
+    wrong = status_for("nope")
+    ok = dash.startswith("200") and scan.startswith("200") and wrong.startswith("401")
+    return ok, f"dashboard={dash.split()[0]}, scan={scan.split()[0]}, wrong={wrong.split()[0]}"
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -496,6 +528,7 @@ TESTS = [
     ("Entry price geometry", test_entry_price_geometry),
     ("Telegram chat binding", test_chat_binding),
     ("Calendar XML fallback", test_calendar_xml_fallback),
+    ("Scan token accepted alongside dashboard token", test_scan_token_accepted),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),
