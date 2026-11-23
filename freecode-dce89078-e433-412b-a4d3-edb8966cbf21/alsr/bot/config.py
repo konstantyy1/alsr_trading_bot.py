@@ -61,6 +61,7 @@ class Env:
     scan_token: str = os.environ.get("SCAN_TOKEN", "")
     dashboard_token: str = os.environ.get("DASHBOARD_TOKEN", "")
     webhook_secret: str = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+    public_url: str = os.environ.get("PUBLIC_URL", "").rstrip("/")
     port: int = _i("PORT", 10000)
     poll_interval_min: int = _i("SCAN_INTERVAL_MIN", 5)
     enable_signals: bool = os.environ.get("ENABLE_SIGNALS", "true").lower() == "true"

@@ -586,6 +586,73 @@ def test_command_offset_advances() -> tuple[bool, str]:
         notify.api_get = original
 
 
+def test_webhook_gives_instant_replies() -> tuple[bool, str]:
+    """Commands must be answered by a webhook, not only by the next scan.
+
+    Telegram queues updates when no webhook is set, and only the five-minute scan
+    drained that queue, so /help looked broken for minutes. The secret is derived
+    from the dashboard token, which means no extra setting is needed and the URL
+    still cannot be guessed. A wrong secret must be refused.
+    """
+    import dataclasses
+    import io
+    import tempfile
+
+    import web
+    from store import Store
+
+    original_store = web._STORE
+    original_env = web.ENV
+    original_state, original_set, original_send = (
+        web.notify.webhook_state, web.notify.set_webhook, web.notify.send
+    )
+    try:
+        web._STORE = Store("", sqlite_path=os.path.join(tempfile.mkdtemp(), "hook.db"))
+        # A deterministic secret needs a token to derive it from. The real service
+        # always has DASHBOARD_TOKEN; the test supplies one so it does not depend on
+        # whatever environment happens to be set.
+        web.ENV = dataclasses.replace(original_env, dashboard_token="dash-test-token",
+                                      scan_token="", webhook_secret="", public_url="",
+                                      telegram_token="123:test-token")
+        secret = web.effective_webhook_secret()
+        if not secret:
+            return False, "секрет не визначено"
+
+        registered = {}
+        web.notify.webhook_state = lambda token: ("", None)
+        web.notify.set_webhook = lambda token, url, sec: (registered.update(url=url, sec=sec) or True, None)
+        status = web.ensure_webhook(web._STORE, {"HTTP_X_FORWARDED_HOST": "alsr-bot.onrender.com"}, web.ENV)
+        built = registered.get("url", "")
+        url_ok = built.endswith(f"/telegram/{secret}") and built.startswith("https://alsr-bot.onrender.com")
+        sec_ok = registered.get("sec") == secret
+
+        sent: list[str] = []
+        web.notify.send = lambda token, chat, text: (sent.append(text) or True, None)
+        body = b'{"update_id":1,"message":{"chat":{"id":123},"text":"/help"}}'
+
+        def deliver(with_secret: str) -> str:
+            env = {
+                "PATH_INFO": f"/telegram/{secret}", "REQUEST_METHOD": "POST",
+                "CONTENT_LENGTH": str(len(body)), "CONTENT_TYPE": "application/json",
+                "HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN": with_secret, "wsgi.input": io.BytesIO(body),
+            }
+            out = {}
+            web.application(env, lambda status, headers: out.update(s=status))
+            return out.get("s", "")
+
+        answered = deliver(secret).startswith("200") and len(sent) == 1
+        refused = deliver("wrong").startswith("403")
+        ok = status.startswith("ok") and url_ok and sec_ok and answered and refused
+        return ok, (f"url={url_ok}, secret={sec_ok}, відповідь={answered}, "
+                    f"чужий={refused}")
+    finally:
+        web._STORE = original_store
+        web.ENV = original_env
+        web.notify.webhook_state = original_state
+        web.notify.set_webhook = original_set
+        web.notify.send = original_send
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -611,6 +678,7 @@ TESTS = [
     ("Scan token triggers a scan only", test_scan_token_accepted),
     ("Scheduled briefings stay quiet", test_scheduled_briefings_not_spammy),
     ("Telegram commands advance offset", test_command_offset_advances),
+    ("Instant command replies (webhook)", test_webhook_gives_instant_replies),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

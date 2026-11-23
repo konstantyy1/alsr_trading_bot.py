@@ -121,6 +121,75 @@ def _scan_authorized(environ, query: dict) -> bool:
     return token_matches(_presented(environ, query), _scan_tokens())
 
 
+def effective_webhook_secret(env=None) -> str:
+    """Secret for the Telegram webhook.
+
+    Falls back to a value derived from the dashboard token, so instant command
+    replies work with no extra setup: the URL contains only a hash, and Telegram
+    echoes the same string back in a header for route_telegram to verify.
+    """
+    env = env or ENV
+    if env.webhook_secret:
+        return env.webhook_secret
+    seed = env.dashboard_token or env.scan_token
+    if not seed:
+        return ""
+    return hashlib.sha256(f"tg-webhook:{seed}".encode()).hexdigest()[:40]
+
+
+def _service_base(environ=None, env=None) -> str:
+    """Public base URL of this service.
+
+    Render exposes the external host in X-Forwarded-Host, so the webhook can be
+    registered without the owner copying a URL into a setting. PUBLIC_URL always
+    wins when set.
+    """
+    env = env or ENV
+    if env.public_url:
+        return env.public_url
+    if environ:
+        host = (environ.get("HTTP_X_FORWARDED_HOST") or environ.get("HTTP_HOST") or "").split(",")[0].strip()
+        if host:
+            return f"https://{host}"
+    return ""
+
+
+def ensure_webhook(store=None, environ=None, env=None) -> str:
+    """Register the webhook once, so commands answer immediately.
+
+    Without it Telegram keeps updates in a queue that only the five-minute scan
+    drains, and /help appears to do nothing. Returns a short status for logging.
+    """
+    env = env or ENV
+    token = env.telegram_token
+    base = _service_base(environ, env)
+    secret = effective_webhook_secret(env)
+    if not token or not base or not secret:
+        return "skip:немає URL або токена"
+
+    target = f"{base}/telegram/{secret}"
+    url, err = notify.webhook_state(token)
+    if err is None and url == target:
+        return "ok:вже налаштовано"
+
+    ok, serr = notify.set_webhook(token, target, secret)
+    if not ok:
+        return f"error:{serr}"
+    if store is not None:
+        store.set_setting("webhook_url", target)
+    return "ok:зареєстровано"
+
+
+def register_webhook_if_needed(environ=None) -> None:
+    """Best effort at start-up. A failure must never stop the service."""
+    try:
+        status = ensure_webhook(_STORE, environ, ENV)
+        if status.startswith("error"):
+            _STORE.log("warn", "telegram", f"Вебхук не зареєстровано: {status}")
+    except Exception as exc:  # noqa: BLE001
+        _STORE.log("warn", "telegram", f"Вебхук: {exc}")
+
+
 # --------------------------------------------------------------------------- helpers
 def _json(environ, start_response, status_code: int, payload, extra_headers=None):
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -330,7 +399,7 @@ def route_scan(environ, start_response):
 
 
 def route_telegram(environ, start_response, secret: str) -> list:
-    expected = ENV.webhook_secret
+    expected = effective_webhook_secret()
     supplied = environ.get("HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN", "")
     if not expected or not _secure_eq(secret, expected) or not _secure_eq(supplied, expected):
         return _json(environ, start_response, 403, {"ok": False})
@@ -387,6 +456,16 @@ def application(environ, start_response):
 
     if path.startswith("/telegram/"):
         return route_telegram(environ, start_response, path[len("/telegram/"):])
+
+    # Self-heal: if the webhook is missing (fresh deploy, wiped SQLite), register it
+    # on the first authenticated request. Telegram then delivers commands instantly
+    # instead of waiting for the next five-minute scan.
+    if path in ("/api/status", "/api/scan") and _authorized(environ, query):
+        try:
+            if notify.webhook_state(ENV.telegram_token)[0] == "":
+                register_webhook_if_needed(environ)
+        except Exception:  # noqa: BLE001 - never block a request on this
+            pass
 
     if path == "/":
         if _authorized(environ, query):
