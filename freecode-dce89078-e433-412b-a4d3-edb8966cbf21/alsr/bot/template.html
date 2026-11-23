@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>EUR/USD · приватний термінал</title>
+<style>
+  :root {
+    --ink: #0f1417;
+    --panel: #151d21;
+    --panel-2: #1a2429;
+    --rule: #27343b;
+    --rule-soft: #1e282e;
+    --text: #e3eaec;
+    --muted: #8b9ba4;
+    --dim: #63737c;
+    --jade: #6fb99b;
+    --amber: #d9a24a;
+    --red: #c4645c;
+    --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ink); color: var(--text); }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 0 22px 72px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 18px; flex-wrap: wrap;
+    padding: 26px 0 14px; border-bottom: 1px solid var(--rule);
+  }
+  .ident { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .ident h1 {
+    font-family: var(--serif); font-weight: 500; font-size: 27px;
+    letter-spacing: 0.01em; margin: 0;
+  }
+  .ident .sub { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .ident .sub b { color: var(--muted); font-weight: 500; }
+  .clock { text-align: right; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .clock strong { display: block; font-size: 20px; color: var(--text); font-weight: 500; letter-spacing: 0.02em; }
+  .live { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .dot.on { background: var(--jade); box-shadow: 0 0 0 3px rgba(111,185,155,.14); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 0 3px rgba(217,162,74,.14); }
+  .dot.off { background: var(--red); box-shadow: 0 0 0 3px rgba(196,100,92,.14); }
+
+  /* ---------- layout ---------- */
+  .grid { display: grid; grid-template-columns: 340px 1fr; }
+  .rail { border-right: 1px solid var(--rule); padding-right: 26px; }
+  .main { padding-left: 26px; }
+
+  section { padding: 22px 0; border-bottom: 1px solid var(--rule-soft); }
+  section:last-child { border-bottom: 0; }
+  .head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 12px;
+  }
+  .head h2 {
+    font-family: var(--serif); font-size: 17px; font-weight: 500; margin: 0; letter-spacing: .01em;
+  }
+  .head .note { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: right; }
+
+  /* ---------- verdict stamp ---------- */
+  .stamp {
+    display: inline-block; padding: 7px 15px 8px;
+    border: 2px solid currentColor; border-radius: 3px;
+    font-family: var(--mono); font-size: 15px; font-weight: 700;
+    letter-spacing: 0.16em; text-transform: uppercase;
+    transform: rotate(-2deg); color: var(--muted);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.35);
+  }
+  .stamp.signal { color: var(--jade); }
+  .stamp.blocked { color: var(--red); }
+  .stamp.no_trade { color: var(--amber); }
+  .stamp small { display: block; font-size: 9px; letter-spacing: .12em; font-weight: 400; opacity: .75; }
+
+  /* ---------- price ---------- */
+  .price {
+    font-family: var(--mono); font-size: 52px; line-height: 1; font-weight: 500;
+    letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+  }
+  .price .dec { color: var(--muted); }
+  .price-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .delta { font-family: var(--mono); font-size: 13px; }
+  .up { color: var(--jade); } .down { color: var(--red); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; margin-top: 16px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+
+  .age { margin-top: 16px; }
+  .age-bar { height: 3px; background: var(--rule-soft); position: relative; overflow: hidden; border-radius: 2px; }
+  .age-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--jade); transition: width .4s ease; }
+  .age-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 6px; }
+
+  /* ---------- structure table ---------- */
+  .tf { display: grid; grid-template-columns: 46px 1fr 74px 62px; gap: 10px; align-items: baseline;
+        padding: 7px 0; border-bottom: 1px solid var(--rule-soft); font-family: var(--mono); font-size: 13px; }
+  .tf:last-child { border-bottom: 0; }
+  .tf .name { color: var(--muted); }
+  .tf .struct { letter-spacing: .02em; }
+  .tf .num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 2px;
+         font-size: 9px; letter-spacing: .06em; border: 1px solid currentColor; vertical-align: 1px; }
+
+  /* ---------- lines / lists ---------- */
+  .row { display: flex; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule-soft); font-size: 13.5px; }
+  .row:last-child { border-bottom: 0; }
+  .row .when { font-family: var(--mono); font-size: 11.5px; color: var(--dim); min-width: 92px; padding-top: 2px; }
+  .row .body { flex: 1; min-width: 0; }
+  .row .body b { font-weight: 500; }
+  .row .meta { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 2px; }
+  .impact { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
+  .i-high { background: var(--red); } .i-medium { background: var(--amber); } .i-low { background: var(--dim); }
+
+  .empty { color: var(--dim); font-size: 13.5px; padding: 4px 0 6px; }
+
+  /* ---------- signal ticket ---------- */
+  .ticket { border: 1px solid var(--rule); background: var(--panel); margin-bottom: 12px; }
+  .ticket-top { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+                padding: 9px 13px; border-bottom: 1px solid var(--rule); background: var(--panel-2); }
+  .ticket-top .side { font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: .06em; }
+  .ticket-top .grade { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ticket-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 1px;
+                 background: var(--rule-soft); }
+  .cell { background: var(--panel); padding: 8px 11px; }
+  .cell span { display: block; font-size: 10.5px; color: var(--dim); letter-spacing: .03em; }
+  .cell b { font-family: var(--mono); font-weight: 500; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ticket-foot { padding: 9px 13px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--rule); }
+  .ticket-foot p { margin: 0 0 4px; }
+  .why-list { margin: 6px 0 0; padding-left: 15px; color: var(--muted); font-size: 12.5px; }
+  .why-list li { margin-bottom: 3px; }
+
+  /* ---------- stats ---------- */
+  .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--rule-soft); border: 1px solid var(--rule-soft); }
+  .fig { background: var(--ink); padding: 12px 13px; }
+  .fig span { display: block; font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+  .fig b { font-family: var(--mono); font-size: 19px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .caution {
+    margin-top: 12px; padding: 9px 12px; border-left: 2px solid var(--amber);
+    background: rgba(217,162,74,.07); font-size: 12.5px; color: #d8c39a;
+  }
+  .caution.ok { border-left-color: var(--jade); background: rgba(111,185,155,.06); color: #b6d3c7; }
+
+  /* ---------- misc ---------- */
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule);
+           font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .err { border-left: 2px solid var(--red); background: rgba(196,100,92,.08); padding: 9px 12px; font-size: 12.5px; color: #e0b3ae; }
+
+  button {
+    font: inherit; font-size: 12.5px; padding: 7px 13px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--rule); border-radius: 3px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--jade); color: var(--jade); }
+  button:disabled { opacity: .5; cursor: default; }
+  .chatpick { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0;
+              border-bottom: 1px solid var(--rule-soft); font-size: 13px; }
+  .chatpick:last-child { border-bottom: 0; }
+  .chatpick code { font-family: var(--mono); color: var(--jade); }
+
+  a { color: inherit; }
+
+  @media (max-width: 900px) {
+    body { padding: 0 15px 56px; }
+    .grid { grid-template-columns: 1fr; }
+    .rail { border-right: 0; border-bottom: 1px solid var(--rule); padding-right: 0; }
+    .main { padding-left: 0; }
+    .price { font-size: 44px; }
+    header { padding-top: 18px; }
+    .clock { text-align: left; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  :focus-visible { outline: 2px solid var(--jade); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="ident">
+      <h1>EUR/USD — робочий журнал</h1>
+      <div class="sub">інтрадей · <b id="dbKind">—</b> · <b id="ver">—</b></div>
+    </div>
+    <div class="clock">
+      <strong id="clock">--:--</strong>
+      <span class="live"><i class="dot" id="liveDot"></i><span id="liveText">немає звʼязку</span></span>
+      <div style="margin-top:8px"><button id="btnScan" type="button">Запустити скан</button></div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- ============ left rail ============ -->
+    <div class="rail">
+      <section>
+        <div class="head"><h2>Ціна</h2><div class="note" id="priceSource">—</div></div>
+        <div id="priceBlock"><div class="price">—</div></div>
+
+        <div class="age">
+          <div class="age-bar"><div class="age-fill" id="ageFill"></div></div>
+          <div class="age-label"><span id="ageText">свіжість котирування</span><span id="ageLimit">—</span></div>
+        </div>
+
+        <dl class="kv" id="quoteKv"></dl>
+      </section>
+
+      <section>
+        <div class="head"><h2>Рішення</h2><div class="note" id="verdictAt">—</div></div>
+        <div class="stamp no_trade" id="stamp">очікування<small>вердикт скану</small></div>
+        <div class="kv" style="margin-top:14px">
+          <dt>Сесія</dt><dd id="sessName">—</dd>
+          <dt>Якість</dt><dd id="sessQuality">—</dd>
+          <dt>Новини</dt><dd id="newsLevel">—</dd>
+          <dt>Скан</dt><dd id="scanAge">—</dd>
+        </div>
+        <p class="small muted" id="verdictReason" style="margin:12px 0 0"></p>
+      </section>
+
+      <section>
+        <div class="head"><h2>Структура</h2><div class="note">закриті свічки</div></div>
+        <div id="frames"></div>
+      </section>
+
+      <section>
+        <div class="head"><h2>Рівні</h2></div>
+        <dl class="kv" id="levels"></dl>
+      </section>
+    </div>
+
+    <!-- ============ main column ============ -->
+    <div class="main">
+      <section>
+        <div class="head">
+          <h2>Активні сценарії</h2>
+          <div class="note" id="openCount">—</div>
+        </div>
+        <div id="openSignals"><p class="empty">Завантаження…</p></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Найближчі події</h2>
+          <div class="note" id="calCount">EUR / USD</div>
+        </div>
+        <div id="calendar"><p class="empty">Завантаження…</p></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Облік</h2>
+          <div class="note">віртуальні позиції</div>
+        </div>
+        <div id="stats"><p class="empty">Завантаження…</p></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Останні сигнали</h2>
+          <div class="note" id="histCount">—</div>
+        </div>
+        <div id="history"><p class="empty">Завантаження…</p></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Чому саме так</h2>
+          <div class="note">журнал рішень</div>
+        </div>
+        <div id="decisions"><p class="empty">Завантаження…</p></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Підключення</h2>
+          <div class="note" id="connNote">перевірка</div>
+        </div>
+        <div id="conn" class="small muted">Перевіряю бота…</div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button id="btnDiscover" type="button">Знайти chat ID</button>
+          <button id="btnHello" type="button">Надіслати тест у Telegram</button>
+        </div>
+        <div id="connResult" class="small" style="margin-top:10px"></div>
+      </section>
+
+      <section>
+        <div class="head">
+          <h2>Самоперевірка</h2>
+          <div class="note" id="stSummary">—</div>
+        </div>
+        <div id="selftest"></div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    <span>Аналітика й віртуальний облік. Жодного наказу брокеру не надсилалось.</span>
+    <span class="mono" id="footMeta"></span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fx5 = (v) => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(5);
+  const pips = (v) => (v === null || v === undefined) ? "—" : `${Number(v).toFixed(1)} pips`;
+  const MIN = 240;
+
+  const FAIL = (msg) => `<div class="err">Не вдалось отримати дані: ${esc(msg)}</div>`;
+
+  async function getJSON(path) {
+    const res = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function clock() {
+    const d = new Date();
+    const w = d.toLocaleTimeString("pl-PL", { timeZone: "Europe/Warsaw", hour: "2-digit", minute: "2-digit" });
+    $("clock").textContent = w;
+  }
+
+  function setLive(state, text) {
+    $("liveDot").className = "dot " + state;
+    $("liveText").textContent = text;
+  }
+
+  function renderPrice(m) {
+    const q = m.quote;
+    if (!q) {
+      $("priceBlock").innerHTML = `<div class="price" style="font-size:26px;color:var(--red)">дані недоступні</div>`;
+      $("quoteKv").innerHTML = "";
+      $("priceSource").textContent = m.status;
+      return;
+    }
+    const s = fx5(q.mid);
+    const [whole, dec] = [s.slice(0, -2), s.slice(-2)];
+    $("priceBlock").innerHTML = `<div class="price">${esc(whole)}<span class="dec">${esc(dec)}</span></div>
+      <div class="small muted" style="margin-top:6px">${esc(m.status)} · ${esc(q.provider)}</div>`;
+
+    $("quoteKv").innerHTML = `
+      <dt>Bid / Ask</dt><dd>${fx5(q.bid)} / ${fx5(q.ask)}</dd>
+      <dt>Spread</dt><dd>${pips(q.spread_pips)} ${q.spread_is_assumed ? '<span class="tag" style="color:var(--amber)">припущення</span>' : ""}</dd>
+      <dt>Довідковий курс</dt><dd>${m.reference ? fx5(m.reference.mid) : "—"}</dd>
+      <dt>Розбіжність</dt><dd>${m.reference && m.reference.deviation_pips != null ? pips(m.reference.deviation_pips) : "—"}</dd>`;
+
+    const age = q.age_sec ?? 0;
+    const pct = Math.max(0, Math.min(100, (age / MIN) * 100));
+    const fill = $("ageFill");
+    fill.style.width = pct + "%";
+    fill.style.background = age > MIN * 0.75 ? "var(--red)" : age > MIN * 0.4 ? "var(--amber)" : "var(--jade)";
+    $("ageText").textContent = `котирування ${age} с тому`;
+    $("ageLimit").textContent = `ліміт ${MIN} с`;
+    $("priceSource").textContent = m.status;
+  }
+
+  function renderFrames(m) {
+    const order = ["H4", "H1", "M15", "M5"];
+    const label = { bull: "бичача", bear: "ведмежа", range: "діапазон" };
+    $("frames").innerHTML = order.map((tf) => {
+      const f = m.frames?.[tf];
+      if (!f) return "";
+      const cls = f.structure === "bull" ? "up" : f.structure === "bear" ? "down" : "muted";
+      const marks = [];
+      if (f.bos) marks.push(`<span class="tag">BOS ${esc(f.bos)}</span>`);
+      if (f.choch) marks.push(`<span class="tag">CHoCH ${esc(f.choch)}</span>`);
+      if (f.displacement) marks.push(`<span class="tag" style="color:var(--amber)">disp ${esc(f.displacement.dir)}</span>`);
+      return `<div class="tf">
+        <span class="name">${tf}</span>
+        <span class="struct ${cls}">${esc(label[f.structure] || f.structure)}${marks.join("")}</span>
+        <span class="num">${esc(f.atr_pips)} p</span>
+        <span class="num">RSI ${esc(f.rsi)}</span>
+      </div>`;
+    }).join("");
+  }
+
+  function renderLevels(m) {
+    const map = { DAY_HIGH: "PDH", DAY_LOW: "PDL", WEEK_HIGH: "Тиж. max", WEEK_LOW: "Тиж. min" };
+    const rows = (m.levels || []).map((l) => `<dt>${esc(map[l.kind] || l.kind)}</dt><dd>${fx5(l.price)}</dd>`);
+    $("levels").innerHTML = rows.length ? rows.join("") : `<dt>—</dt><dd>рівні не визначені</dd>`;
+  }
+
+  function renderMarket(m, status) {
+    renderPrice(m);
+    renderFrames(m);
+    renderLevels(m);
+    const s = m.session || {};
+    $("sessName").textContent = s.active || "—";
+    $("sessQuality").textContent = [s.quality, s.killzone ? "killzone" : null].filter(Boolean).join(" · ") || "—";
+    const n = m.news || {};
+    $("newsLevel").textContent = n.level === "UNKNOWN" ? "невідомо" : (n.level || "—");
+    $("newsLevel").style.color = (n.level === "BLOCKED" || n.level === "UNKNOWN") ? "var(--red)"
+      : n.level === "ELEVATED" ? "var(--amber)" : "var(--jade)";
+    if (n.next) {
+      $("verdictReason").textContent = `${n.reason} Найближче: ${n.next.title} (${n.next.currency}) через ${n.minutes_to_next} хв.`;
+    } else {
+      $("verdictReason").textContent = n.reason || "";
+    }
+    if (status && status.scan) {
+      const last = status.scan.last_run_at ? new Date(status.scan.last_run_at) : null;
+      const mins = last ? Math.round((Date.now() - last.getTime()) / 60000) : null;
+      $("scanAge").textContent = mins === null ? "не запускався" : mins < 1 ? "щойно" : `${mins} хв тому`;
+      $("scanAge").style.color = mins !== null && mins > 15 ? "var(--amber)" : "";
+    }
+  }
+
+  function renderVerdict(decisions) {
+    const d = (decisions?.decisions || [])[0];
+    const stamp = $("stamp");
+    if (!d) {
+      stamp.className = "stamp no_trade";
+      stamp.innerHTML = "скану ще не було<small>натисни «Запустити скан»</small>";
+      $("verdictAt").textContent = "—";
+      return;
+    }
+    const v = String(d.verdict || "").toLowerCase();
+    stamp.className = "stamp " + (v === "signal" ? "signal" : v === "blocked" ? "blocked" : "no_trade");
+    stamp.innerHTML = `${esc(d.verdict.replace("_", " "))}<small>вердикт скану</small>`;
+    $("verdictAt").textContent = new Date(d.at).toLocaleTimeString("pl-PL", { timeZone: "Europe/Warsaw", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function ticket(s) {
+    const sideColor = s.side === "BUY" ? "var(--jade)" : "var(--red)";
+    const cells = [
+      ["Вхід", `${fx5(s.entry_low)}–${fx5(s.entry_high)}`],
+      ["Тригер", fx5(s.trigger)],
+      ["SL", fx5(s.stop)],
+      ["TP1", fx5(s.tp1)],
+      ["TP2", fx5(s.tp2)],
+      ["TP3", s.tp3 ? fx5(s.tp3) : "—"],
+      ["R:R", `1:${s.rr}`],
+      ["Ризик", pips(s.risk_pips)],
+    ];
+    const why = (s.why || []).map((w) => `<li>${esc(w)}</li>`).join("");
+    const ctx = s.context || {};
+    return `<div class="ticket">
+      <div class="ticket-top">
+        <span class="side" style="color:${sideColor}">${esc(s.side)} · ${esc(s.setup)}</span>
+        <span class="grade">${esc(s.grade)} · score ${esc(s.score)}/100 · ${esc(s.status)}</span>
+      </div>
+      <div class="ticket-body">${cells.map(([k, v]) => `<div class="cell"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
+      <div class="ticket-foot">
+        <p class="mono small" style="color:var(--dim)">${esc(s.id)} · ${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", dateStyle: "short", timeStyle: "short" }))} · утримання до ${esc(s.max_hold_min)} хв</p>
+        <p>${esc(ctx.h1 || "")} · ${esc(ctx.m15 || "")}</p>
+        ${why ? `<ul class="why-list">${why}</ul>` : ""}
+      </div>
+    </div>`;
+  }
+
+  function renderSignals(payload) {
+    const open = payload.open || [];
+    $("openCount").textContent = `${open.length} відкрито · ліміт 3`;
+    $("openSignals").innerHTML = open.length
+      ? open.map(ticket).join("")
+      : `<p class="empty">Активних сценаріїв немає. Відсутність сигналу — теж результат: умови не виконані.</p>`;
+
+    const recent = (payload.recent || []).filter((s) => !open.includes(s)).slice(0, 8);
+    $("histCount").textContent = `${(payload.recent || []).length} у базі`;
+    $("history").innerHTML = recent.length ? recent.map((s) => {
+      const r = s.r_result;
+      const rTxt = r === null || r === undefined ? "" : ` · ${r > 0 ? "+" : ""}${r}R`;
+      const color = r > 0 ? "var(--jade)" : r < 0 ? "var(--red)" : "var(--muted)";
+      return `<div class="row">
+        <span class="when">${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}</span>
+        <span class="body"><b>${esc(s.side)} ${esc(s.grade)}</b> · ${esc(s.status)}
+          <span class="meta">${esc(s.id)} · score ${esc(s.score)} · ${esc(s.setup)}</span></span>
+        <span class="mono" style="color:${color}">${esc(rTxt)}</span>
+      </div>`;
+    }).join("") : `<p class="empty">Історія порожня — система щойно запущена.</p>`;
+  }
+
+  function renderStats(p) {
+    if (!p) { $("stats").innerHTML = `<p class="empty">Статистики ще немає.</p>`; return; }
+    const r = p.results || {}, s = p.sample || {}, e = p.equity || {};
+    const figs = [
+      ["Завершено", String(s.closed ?? 0)],
+      ["TP / SL", `${r.wins ?? 0} / ${r.losses ?? 0}`],
+      ["Win rate", r.win_rate_pct == null ? "—" : r.win_rate_pct + "%"],
+      ["Сумарно R", r.total_r == null ? "—" : (r.total_r > 0 ? "+" : "") + r.total_r],
+      ["Очікування", r.expectancy_r == null ? "—" : (r.expectancy_r > 0 ? "+" : "") + r.expectancy_r + "R"],
+      ["Капітал", `$${Number(e.now ?? 0).toFixed(2)}`],
+      ["Макс. просадка", e.max_drawdown_pct == null ? "—" : e.max_drawdown_pct + "%"],
+    ];
+    const caution = s.enough_for_conclusions
+      ? `<div class="caution ok">Вибірка ${s.closed} угод. Цього достатньо для першої оцінки, але не для висновку про прибутковість.</div>`
+      : `<div class="caution">Лише ${s.closed} завершених угод. Будь-який відсоток тут — шум, не результат. Потрібно щонайменше 100.</div>`;
+    const bySetup = (p.by_setup || []).slice(0, 4).map((g) =>
+      `<div class="row"><span class="body">${esc(g.key)}<span class="meta">${g.count} угод · ${g.wins} TP</span></span>
+       <span class="mono" style="color:${g.total_r > 0 ? "var(--jade)" : g.total_r < 0 ? "var(--red)" : "var(--muted)"}">${g.total_r > 0 ? "+" : ""}${g.total_r}R</span></div>`).join("");
+    $("stats").innerHTML = `<div class="figures">${figs.map(([k, v]) => `<div class="fig"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
+      ${caution}
+      ${bySetup ? `<div style="margin-top:14px">${bySetup}</div>` : ""}
+      <p class="small muted" style="margin:12px 0 0">${esc(p.disclaimer || "")}</p>`;
+  }
+
+  function renderCalendar(p) {
+    const rows = (p.upcoming || []).slice(0, 8);
+    $("calCount").textContent = `${p.counts?.upcoming ?? 0} попереду`;
+    $("calendar").innerHTML = rows.length ? rows.map((e) => {
+      const when = e.minutes < 120 ? `через ${e.minutes} хв` : `через ${(e.minutes / 60).toFixed(1)} год`;
+      const values = [e.actual, e.forecast, e.previous].some(Boolean)
+        ? `<span class="meta">actual ${esc(e.actual || "—")} · forecast ${esc(e.forecast || "—")} · previous ${esc(e.previous || "—")}</span>` : "";
+      return `<div class="row">
+        <span class="when">${esc(e.at_warsaw.slice(11))}<br>${esc(when)}</span>
+        <span class="body"><i class="impact i-${esc(e.impact)}"></i><b>${esc(e.title)}</b>
+          <span class="meta">${esc(e.currency)} · ${esc(e.impact)} · ${esc(e.source)}</span>${values}</span>
+      </div>`;
+    }).join("") : `<p class="empty">${esc(p.note || "Календар порожній. Запусти скан — події зʼявляться тут.")}</p>`;
+  }
+
+  function renderDecisions(p) {
+    const rows = (p.decisions || []).slice(0, 6);
+    $("decisions").innerHTML = rows.length ? rows.map((d) => {
+      const color = d.verdict === "SIGNAL" ? "var(--jade)" : d.verdict === "BLOCKED" ? "var(--red)" : "var(--amber)";
+      return `<div class="row">
+        <span class="when">${esc(new Date(d.at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}</span>
+        <span class="body"><b style="color:${color}">${esc(d.verdict)}</b> · ${esc(d.session)}
+          <span class="meta">${esc((d.details || []).slice(0, 3).join(" · "))}</span></span>
+      </div>`;
+    }).join("") : `<p class="empty">Ще немає зафіксованих рішень.</p>`;
+  }
+
+  function renderSelftest(p) {
+    if (!p) { $("selftest").innerHTML = `<p class="empty">Перевірки недоступні.</p>`; return; }
+    $("stSummary").textContent = `${p.passed}/${p.total} пройдено`;
+    $("stSummary").style.color = p.ok ? "var(--jade)" : "var(--red)";
+    const failed = (p.results || []).filter((r) => !r.ok);
+    $("selftest").innerHTML = failed.length
+      ? failed.map((r) => `<div class="row"><span class="body"><b style="color:var(--red)">${esc(r.name)}</b><span class="meta">${esc(r.note)}</span></span></div>`).join("")
+      : `<p class="small muted" style="margin:0">Усі ${p.total} перевірок пройдено: часові зони, сесії, новинний фільтр, життєвий цикл, шаблон сигналу.</p>`;
+  }
+
+  function renderConn(status) {
+    const t = status.telegram || {};
+    const bound = t.chat_bound;
+    $("connNote").textContent = bound ? "підключено" : "потрібен chat ID";
+    $("connNote").style.color = bound ? "var(--jade)" : "var(--amber)";
+    $("conn").innerHTML = `
+      <div class="chatpick"><span>Bot token</span><b>${t.configured ? "✅ заданий" : "❌ немає"}</b></div>
+      <div class="chatpick"><span>Chat ID</span><code>${bound ? "заданий" : "не заданий"}</code></div>
+      <div class="chatpick"><span>Сигнали</span><b>${t.signals_enabled ? "▶️ увімкнені" : "⏸ пауза"}</b></div>`;
+  }
+
+  async function post(path) {
+    const res = await fetch(path, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } });
+    return res.json();
+  }
+
+  $("btnDiscover").addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    $("connResult").innerHTML = `<span class="muted">Питаю Telegram…</span>`;
+    try {
+      const d = await post("/api/telegram/discover");
+      if (!d.bot_token_ok) {
+        $("connResult").innerHTML = `<div class="err">Токен бота не працює: ${esc(d.error || "невідома помилка")}. ${esc(d.hint || "")}</div>`;
+        return;
+      }
+      const rows = (d.chats || []).map((c) =>
+        `<div class="chatpick"><span>${esc(c.title || c.type || "чат")}${c.username ? ` · @${esc(c.username)}` : ""}<br><span class="muted" style="font-size:11px">${esc(c.type || "")}</span></span><code>${esc(c.chat_id)}</code></div>`).join("");
+      $("connResult").innerHTML = `
+        <p style="margin:0 0 6px">Бот: <b>@${esc(d.bot?.username || "?")}</b>${d.chat_bound ? ` · привʼязаний chat <code>${esc(d.chat_bound)}</code>` : ""}</p>
+        ${rows || `<p class="muted" style="margin:0">${esc(d.hint || "")}</p>`}
+        ${rows ? `<p class="muted" style="margin:8px 0 0">Скопіюй цей номер у змінну <code>TELEGRAM_CHAT_ID</code> і перезапусти сервіс.</p>` : ""}`;
+    } catch (e) {
+      $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    } finally { ev.target.disabled = false; }
+  });
+
+  $("btnHello").addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    $("connResult").innerHTML = `<span class="muted">Надсилаю…</span>`;
+    try {
+      const d = await post("/api/telegram/hello");
+      $("connResult").innerHTML = d.sent
+        ? `<span style="color:var(--jade)">Повідомлення надіслано — перевір Telegram.</span>`
+        : `<div class="err">Не надіслано: ${esc(d.error || "невідома помилка")}</div>`;
+    } catch (e) {
+      $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    } finally { ev.target.disabled = false; }
+  });
+
+  $("btnScan").addEventListener("click", async (ev) => {
+    const btn = ev.target;
+    btn.disabled = true;
+    btn.textContent = "Сканую…";
+    try {
+      const res = await fetch("/api/scan", { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } });
+      const d = await res.json();
+      if (!res.ok) {
+        $("connResult").innerHTML = `<div class="err">Скан не виконано: ${esc(d.error || ("HTTP " + res.status))}</div>`;
+      } else {
+        const why = (d.details || [])[0] || "";
+        $("connResult").innerHTML = `<span style="color:var(--jade)">Скан виконано за ${d.duration_ms} мс.</span>
+          <br><span class="muted">${esc(d.verdict)} · ${esc(why)}</span>`;
+        await refresh();
+      }
+    } catch (e) {
+      $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Запустити скан";
+    }
+  });
+
+  async function refresh() {
+    clock();
+    try {
+      const [status, market] = await Promise.all([getJSON("/api/status"), getJSON("/api/market")]);
+      setLive(status.telegram?.configured ? "on" : "warn",
+              status.telegram?.configured ? "Telegram підключено" : "Telegram не налаштовано");
+      $("dbKind").textContent = status.data?.database_persistent ? "postgres" : "sqlite (тимчасове)";
+      $("ver").textContent = "v" + (status.version || "");
+      $("dbKind").style.color = status.data?.database_persistent ? "" : "var(--amber)";
+      renderMarket(market, status);
+      renderConn(status);
+      $("footMeta").textContent = status.now_warsaw ? `${status.now_warsaw} Europe/Warsaw` : "";
+    } catch (err) {
+      setLive("off", "немає звʼязку");
+      $("priceBlock").innerHTML = FAIL(err.message);
+    }
+
+    const settle = (id, fn) => getJSON(id).then(fn).catch((e) => { $(id.replace("/api/", "").replace("/", "")).innerHTML = FAIL(e.message); });
+
+    const [sig, stats, cal, dec, st] = await Promise.allSettled([
+      getJSON("/api/signals"), getJSON("/api/stats"), getJSON("/api/calendar"),
+      getJSON("/api/decisions"), getJSON("/api/selftest"),
+    ]);
+    if (sig.status === "fulfilled") renderSignals(sig.value); else $("openSignals").innerHTML = FAIL(sig.reason.message);
+    if (stats.status === "fulfilled") renderStats(stats.value);
+    if (cal.status === "fulfilled") renderCalendar(cal.value); else $("calendar").innerHTML = FAIL(cal.reason.message);
+    if (dec.status === "fulfilled") { renderDecisions(dec.value); renderVerdict(dec.value); }
+    if (st.status === "fulfilled") renderSelftest(st.value); else $("selftest").innerHTML = FAIL(st.reason.message);
+  }
+
+  refresh();
+  setInterval(clock, 1000);
+  setInterval(refresh, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+})();
+</script>
+</body>
+</html>

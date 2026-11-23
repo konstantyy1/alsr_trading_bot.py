@@ -1,0 +1,42 @@
+# Render blueprint. Secrets are NOT stored here: set them in the dashboard
+# (Environment tab) or with `render.yaml` envVar groups that sync from the dashboard.
+services:
+  - type: web
+    name: alsr-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: alsr
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn wsgi:application --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --log-file -
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DASHBOARD_TOKEN
+        sync: false
+      - key: SCAN_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: SCAN_INTERVAL_MIN
+        value: "5"
+      - key: RISK_PERCENT
+        value: "0.35"
+      - key: ACCOUNT_EQUITY
+        value: "10000"
+      - key: MAX_SIGNALS_PER_DAY
+        value: "4"
+      - key: MAX_OPEN_SETUPS
+        value: "3"
+      - key: ENABLE_SIGNALS
+        value: "true"
+      - key: ENABLE_NEWS
+        value: "true"

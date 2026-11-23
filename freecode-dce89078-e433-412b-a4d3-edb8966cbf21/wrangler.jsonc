@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fx-intel",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "KV"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "SYMBOL": "EUR_USD",
+    "HISTORY_LIMIT": "1500",
+    "NEWS_ENABLED": "true",
+    "TELEGRAM_ENABLED": "true"
+  },
+  "secrets": {
+    "required": [
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_CHAT_ID",
+      "SCAN_TOKEN"
+    ]
+  }
+}
