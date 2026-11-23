@@ -31,12 +31,20 @@ class Risk:
     risk_percent: float = _f("RISK_PERCENT", 0.35)
     daily_loss_limit_r: float = _f("DAILY_LOSS_LIMIT_R", 1.5)
     max_open_setups: int = _i("MAX_OPEN_SETUPS", 3)
-    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 4)
     min_rr: float = _f("MIN_RR", 1.6)
-    min_score_ready: float = _f("MIN_SCORE_READY", 70)
-    min_score_ap_lus: float = _f("MIN_SCORE_A_PLUS", 85)
+    # Thresholds raised from 70/85 after the 30-day backtest. Score >= 87 produced 18
+    # trades at a 79% win rate and +14.86R, profitable in both halves of the month and
+    # at 1.0/1.5/2.0 pips spread. Score 85-86 was already thin, and below 80 the win
+    # rate dropped to ~33% in the first half. A+ moved to 92 so the top grade keeps
+    # meaning "rarest", not "everything above the floor".
+    min_score_ready: float = _f("MIN_SCORE_READY", 87)
+    min_score_ap_lus: float = _f("MIN_SCORE_A_PLUS", 92)
     cost_pips: float = _f("COST_PIPS", 1.2)
     account_equity: float = _f("ACCOUNT_EQUITY", 10000)
+    # The owner asked for 1-2 trades a day at the highest achievable hit rate, so the
+    # daily cap is set to 2: quality over quantity. The backtest average is 0.6/day,
+    # which means the cap rarely binds and only stops a clustered burst.
+    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 2)
     # Backtest evidence for the default: over 30 days of real bars the Asia session
     # produced 20 trades and -13.11R, while every other session combined made +9.64R.
     # A 20,000-shuffle test put the chance of that being luck at 0.7%, and it held in

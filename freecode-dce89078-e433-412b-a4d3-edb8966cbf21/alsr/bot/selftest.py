@@ -367,6 +367,22 @@ def test_store_dedupe() -> tuple[bool, str]:
     return ok, "claim/dedupe/release/state round-trip"
 
 
+def test_backtest_thresholds_hold() -> tuple[bool, str]:
+    """The thresholds must match the evidence, and A+ must stay rarer than A.
+
+    Raising the floor to 87 was a decision from the backtest (79% win rate, +14.86R,
+    profitable in both halves of the month). If someone lowers it later without new
+    evidence, entries the test rejected come back, so the floor is asserted here.
+    """
+    from config import Risk
+
+    risk = Risk()
+    floor = float(risk.min_score_ready)
+    plus = float(risk.min_score_ap_lus)
+    ok = floor >= 85 and plus > floor and risk.max_signals_per_day <= 3
+    return ok, f"поріг A={floor:g}, A+={plus:g}, максимум {risk.max_signals_per_day} на день"
+
+
 def test_score_is_not_winrate() -> tuple[bool, str]:
     text = format_signal(_signal())
     ok = "відповідність правилам, не ймовірність" in text
@@ -811,6 +827,7 @@ TESTS = [
     ("Position sizing", test_position_sizing),
     ("Store dedupe and state", test_store_dedupe),
     ("Score is not a win rate", test_score_is_not_winrate),
+    ("Backtest thresholds hold", test_backtest_thresholds_hold),
     ("Ticker rendered as pair", test_pair_label),
 ]
 
