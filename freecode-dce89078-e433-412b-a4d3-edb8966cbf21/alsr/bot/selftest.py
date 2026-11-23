@@ -474,11 +474,12 @@ def test_calendar_xml_fallback() -> tuple[bool, str]:
 
 
 def test_scan_token_accepted() -> tuple[bool, str]:
-    """The scheduler token must work even when a dashboard token exists.
+    """The scheduler token triggers a scan, and nothing else.
 
-    Auth used to check only `DASHBOARD_TOKEN or SCAN_TOKEN`, so as soon as the
-    dashboard token was set the scan token silently stopped working and cron could
-    never trigger a run.
+    Two separate things had to be right:
+    1. It must work even when a dashboard password exists (it used to be ignored).
+    2. It must NOT open the terminal or read signals, because it travels in a
+       scheduler URL and could be seen by third parties.
 
     This test must never edit the real environment or reload the live modules: an
     earlier version did exactly that and left the running service rejecting its own
@@ -486,14 +487,17 @@ def test_scan_token_accepted() -> tuple[bool, str]:
     """
     from web import token_matches
 
-    valid = ["dash-token-test", "scan-token-test", ""]
-    dash = token_matches(["dash-token-test", "", "", ""], valid)
-    scan = token_matches(["scan-token-test", "", "", ""], valid)
-    wrong = token_matches(["nope", "", "", ""], valid)
-    empty = token_matches(["", "", "", ""], valid)
+    terminal = ["dash-token-test"]
+    scan_only = ["scan-token-test", "dash-token-test"]
+    found = token_matches(["scan-token-test", "", "", ""], scan_only)
+    blocked = token_matches(["scan-token-test", "", "", ""], terminal)
+    dash_scan = token_matches(["dash-token-test", "", "", ""], scan_only)
+    wrong = token_matches(["nope", "", "", ""], scan_only)
+    empty = token_matches(["", "", "", ""], scan_only)
     no_config = token_matches(["anything"], ["", ""])
-    ok = dash and scan and not wrong and not empty and not no_config
-    return ok, f"dashboard={dash}, scan={scan}, wrong={wrong}, empty={empty}, no-config={no_config}"
+    ok = found and not blocked and dash_scan and not wrong and not empty and not no_config
+    return ok, (f"scan-triggers={found}, scan-opens-terminal={blocked}, "
+                f"dashboard={dash_scan}, wrong={wrong}, empty={empty}")
 
 
 def test_news_feed_down_blocks() -> tuple[bool, str]:
@@ -518,7 +522,7 @@ TESTS = [
     ("Entry price geometry", test_entry_price_geometry),
     ("Telegram chat binding", test_chat_binding),
     ("Calendar XML fallback", test_calendar_xml_fallback),
-    ("Scan token accepted alongside dashboard token", test_scan_token_accepted),
+    ("Scan token triggers a scan only", test_scan_token_accepted),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

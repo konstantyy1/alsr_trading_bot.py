@@ -49,9 +49,22 @@ def get_store() -> Store:
 
 # --------------------------------------------------------------------------- auth
 def _valid_tokens() -> list[str]:
-    """Any configured token is accepted. The dashboard token and the scan token are
-    separate on purpose: a scheduler should not need the password to the terminal."""
-    return [t for t in (ENV.dashboard_token, ENV.scan_token) if t]
+    """Tokens that may open the terminal and read its data.
+
+    Only the dashboard password belongs here. The scan token is deliberately
+    excluded: it lives in a scheduler URL, so it must never grant access to the
+    signal history or the Telegram controls.
+
+    One fallback: if nobody set a dashboard password, the scan token is used
+    instead, so the owner can never lock themselves out of their own terminal.
+    """
+    valid = [t for t in (ENV.dashboard_token,) if t]
+    return valid or _scan_tokens()
+
+
+def _scan_tokens() -> list[str]:
+    """Tokens that may only trigger a scan (and open nothing else)."""
+    return [t for t in (ENV.scan_token, ENV.dashboard_token) if t]
 
 
 def _parse_cookies(environ) -> dict:
@@ -90,14 +103,22 @@ def token_matches(candidates, valid) -> bool:
     return any(_secure_eq(c or "", e) for c in candidates for e in valid)
 
 
-def _authorized(environ, query: dict) -> bool:
-    candidates = [
+def _presented(environ, query: dict) -> list:
+    """Every place a token may arrive, in one list."""
+    return [
         _bearer(environ),
         (query.get("token") or [""])[0],
         _parse_cookies(environ).get(COOKIE_NAME, ""),
         environ.get("HTTP_X_SCAN_TOKEN", ""),
     ]
-    return token_matches(candidates, _valid_tokens())
+
+
+def _authorized(environ, query: dict) -> bool:
+    return token_matches(_presented(environ, query), _valid_tokens())
+
+
+def _scan_authorized(environ, query: dict) -> bool:
+    return token_matches(_presented(environ, query), _scan_tokens())
 
 
 # --------------------------------------------------------------------------- helpers
@@ -376,7 +397,7 @@ def application(environ, start_response):
         return GET_ROUTES[path](environ, start_response)
 
     if path == "/api/scan":
-        if not _authorized(environ, query):
+        if not _scan_authorized(environ, query):
             return _json(environ, start_response, 401, {"error": "Невірний або відсутній токен."})
         return route_scan(environ, start_response)
 
