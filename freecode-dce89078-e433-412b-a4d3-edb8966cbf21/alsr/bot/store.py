@@ -95,10 +95,10 @@ _LOOP = threading.Lock()
 class Store:
     """Small storage facade. Both backends expose the same methods."""
 
-    def __init__(self, database_url: str = "") -> None:
+    def __init__(self, database_url: str = "", sqlite_path: str | None = None) -> None:
         self.url = database_url
         self.backend = "postgres" if database_url.startswith(("postgres://", "postgresql://")) else "sqlite"
-        self._sqlite_path = os.environ.get("SQLITE_PATH", "/tmp/alsr_state.db")
+        self._sqlite_path = sqlite_path or os.environ.get("SQLITE_PATH", "/tmp/alsr_state.db")
         self._ready = False
         self._lock = _LOOP
 

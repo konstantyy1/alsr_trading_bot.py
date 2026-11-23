@@ -294,8 +294,7 @@ def test_store_dedupe() -> tuple[bool, str]:
     from store import Store
 
     path = os.path.join(tempfile.mkdtemp(), "selftest.db")
-    os.environ["SQLITE_PATH"] = path
-    store = Store("")
+    store = Store("", sqlite_path=path)
     first = store.claim_message("selftest:key", "test")
     second = store.claim_message("selftest:key", "test")
     store.release_message("selftest:key")
@@ -480,30 +479,21 @@ def test_scan_token_accepted() -> tuple[bool, str]:
     Auth used to check only `DASHBOARD_TOKEN or SCAN_TOKEN`, so as soon as the
     dashboard token was set the scan token silently stopped working and cron could
     never trigger a run.
+
+    This test must never edit the real environment or reload the live modules: an
+    earlier version did exactly that and left the running service rejecting its own
+    tokens until the next restart. `token_matches` is pure, so it is called directly.
     """
-    import importlib
-    import os
+    from web import token_matches
 
-    os.environ["DASHBOARD_TOKEN"] = "dash-token-test"
-    os.environ["SCAN_TOKEN"] = "scan-token-test"
-    import config
-    import web
-
-    importlib.reload(config)
-    importlib.reload(web)
-
-    def status_for(token):
-        env = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/status", "QUERY_STRING": "",
-               "HTTP_AUTHORIZATION": f"Bearer {token}" if token else ""}
-        out = {}
-        web.application(env, lambda s, h: out.update(s=s))
-        return out.get("s", "")
-
-    dash = status_for("dash-token-test")
-    scan = status_for("scan-token-test")
-    wrong = status_for("nope")
-    ok = dash.startswith("200") and scan.startswith("200") and wrong.startswith("401")
-    return ok, f"dashboard={dash.split()[0]}, scan={scan.split()[0]}, wrong={wrong.split()[0]}"
+    valid = ["dash-token-test", "scan-token-test", ""]
+    dash = token_matches(["dash-token-test", "", "", ""], valid)
+    scan = token_matches(["scan-token-test", "", "", ""], valid)
+    wrong = token_matches(["nope", "", "", ""], valid)
+    empty = token_matches(["", "", "", ""], valid)
+    no_config = token_matches(["anything"], ["", ""])
+    ok = dash and scan and not wrong and not empty and not no_config
+    return ok, f"dashboard={dash}, scan={scan}, wrong={wrong}, empty={empty}, no-config={no_config}"
 
 
 def test_news_feed_down_blocks() -> tuple[bool, str]:

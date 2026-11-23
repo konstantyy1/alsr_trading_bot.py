@@ -77,17 +77,27 @@ def _bearer(environ) -> str:
     return ""
 
 
-def _authorized(environ, query: dict) -> bool:
-    expected = _valid_tokens()
-    if not expected:
+def token_matches(candidates, valid) -> bool:
+    """Pure check: does any presented token match any configured token?
+
+    Kept free of globals on purpose so it can be tested without touching the
+    running process. Any configured token is accepted, because the scheduler
+    token must not require the dashboard password.
+    """
+    valid = [t for t in valid if t]
+    if not valid:
         return False
+    return any(_secure_eq(c or "", e) for c in candidates for e in valid)
+
+
+def _authorized(environ, query: dict) -> bool:
     candidates = [
         _bearer(environ),
         (query.get("token") or [""])[0],
         _parse_cookies(environ).get(COOKIE_NAME, ""),
         environ.get("HTTP_X_SCAN_TOKEN", ""),
     ]
-    return any(_secure_eq(c, e) for c in candidates for e in expected)
+    return token_matches(candidates, _valid_tokens())
 
 
 # --------------------------------------------------------------------------- helpers
