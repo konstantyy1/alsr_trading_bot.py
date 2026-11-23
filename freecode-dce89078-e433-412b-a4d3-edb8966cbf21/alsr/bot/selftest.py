@@ -261,7 +261,65 @@ def test_prev_day_skips_empty_sunday() -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------- messaging & risk
+def test_weak_session_is_blocked() -> tuple[bool, str]:
+    """A session proven negative in backtest must not produce entries.
+
+    The Asia session lost 13.11R over 30 days while every other session together made
+    +9.64R (0.7% chance of being luck). Blocking it is a rule change based on
+    evidence, so the rule itself is checked here rather than trusted to memory.
+    """
+    import dataclasses
+
+    from config import DataCfg, Risk
+    from datafeed import Candle, Quality, Quote, Snapshot
+    from markettime import NewsRisk
+    from signals import evaluate
+
+    risk = Risk(blocked_sessions="Asia")
+    data_cfg = DataCfg()
+    now = datetime(2026, 11, 23, 3, 0, tzinfo=UTC)  # 03:00 UTC = Asia session
+    session = session_info(now)
+    if session.active != "Asia":
+        return False, f"період не Asia, а {session.active}"
+
+    quote = Quote(bid=1.0999, ask=1.1001, mid=1.1000, spread_pips=1.2, ts=now,
+                  provider="test", live=True, spread_is_assumed=True)
+    bars = [Candle(t=int(now.timestamp()) - (60 - i) * 300, o=1.1, h=1.1005, l=1.0995, c=1.1) for i in range(80)]
+    snap = Snapshot(quote=quote, candles={"M5": bars, "M15": bars}, quality=Quality(True, "VERIFIED"),
+                    validator=None, generated_at=now)
+    from analysis import analyse
+
+    frames = {tf: analyse(tf, bars) for tf in ("M5", "M15", "H1", "H4")}
+    verdict = evaluate(snap, frames, [], session, NewsRisk("NONE", "чисто"),
+                       open_count=0, signals_today=0, daily_r=0.0, risk=risk, data_cfg=data_cfg)
+    blocked_asia = verdict.verdict == "BLOCKED" and "слабких" in " ".join(verdict.details)
+
+    # London must not be blocked by the same rule.
+    lon_now = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    lon_session = session_info(lon_now)
+    v2 = evaluate(snap, frames, [], lon_session, NewsRisk("NONE", "чисто"),
+                  open_count=0, signals_today=0, daily_r=0.0, risk=risk, data_cfg=data_cfg)
+    london_free = not any("слабких" in d for d in v2.details)
+
+    ok = blocked_asia and london_free
+    return ok, (f"Asia={blocked_asia}, London вільна={london_free}, verdict Asia={verdict.verdict}")
+
+
 def test_signal_template() -> tuple[bool, str]:
+    """Every promised field must survive a redesign of the message.
+
+    The layout changed to be read on a phone, so the labels are checked by what they
+    carry rather than by their old wording: each price, the risk, the reasoning and
+    the disclaimer must still be present.
+    """
+    text = format_signal(_signal())
+    required = [
+        "рейтинг", "100", "Вхід", "Тригер", "Стоп", "TP1", "TP2", "TP3",
+        "Ризик/прибуток", "хв", "Чому", "відповідність правилам",
+        "Новини", "Спред", "Джерело", "Скасовує сценарій", "не наказ брокеру",
+    ]
+    missing = [k for k in required if k not in text]
+    return not missing, "all template sections present" if not missing else f"missing {missing}"
     """Every promised field must survive a redesign of the message.
 
     The layout changed to be read on a phone, so the labels are checked by what they
@@ -737,6 +795,7 @@ TESTS = [
     ("Telegram commands advance offset", test_command_offset_advances),
     ("Instant command replies (webhook)", test_webhook_gives_instant_replies),
     ("Stale webhook is repaired", test_stale_webhook_is_repaired),
+    ("Weak session is blocked", test_weak_session_is_blocked),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

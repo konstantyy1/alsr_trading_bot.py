@@ -37,6 +37,11 @@ class Risk:
     min_score_ap_lus: float = _f("MIN_SCORE_A_PLUS", 85)
     cost_pips: float = _f("COST_PIPS", 1.2)
     account_equity: float = _f("ACCOUNT_EQUITY", 10000)
+    # Backtest evidence for the default: over 30 days of real bars the Asia session
+    # produced 20 trades and -13.11R, while every other session combined made +9.64R.
+    # A 20,000-shuffle test put the chance of that being luck at 0.7%, and it held in
+    # both halves of the month. Comma-separated names as shown by markettime.
+    blocked_sessions: str = os.environ.get("BLOCKED_SESSIONS", "Asia")
 
 
 @dataclass(frozen=True)

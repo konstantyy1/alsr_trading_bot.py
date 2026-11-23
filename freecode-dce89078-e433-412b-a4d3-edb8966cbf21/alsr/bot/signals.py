@@ -417,6 +417,10 @@ def evaluate(
         return stop("BLOCKED", f"Дані {snap.quality.status}: нові сигнали заборонені.")
     if session.is_weekend:
         return stop("BLOCKED", "Ринок закритий (вихідні).")
+    blocked = {s.strip().lower() for s in str(getattr(risk, "blocked_sessions", "")).split(",") if s.strip()}
+    if session.active.lower() in blocked:
+        return stop("BLOCKED", f"Сесія {session.active} у списку слабких: бектест за місяць показав тут "
+                               f"від'ємний результат. Вхід заблоковано навмисно.")
     if news.level == "BLOCKED":
         return stop("BLOCKED", news.reason)
     if news.level == "UNKNOWN":
