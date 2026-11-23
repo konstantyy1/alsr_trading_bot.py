@@ -146,6 +146,17 @@ def webhook_state(token: str) -> tuple[str, str | None]:
     return ((info.get("result") or {}).get("url") or ""), None
 
 
+def webhook_info(token: str) -> dict:
+    """Raw getWebhookInfo result: url, pending updates and the last delivery error.
+
+    Exposed in the dashboard because a webhook still pointing at an old address is
+    the one failure that leaves the bot silent while every other check looks fine:
+    Telegram posts the command to the stale URL, gets a 403, and keeps retrying.
+    """
+    ok, data, _ = api_get(token, "getWebhookInfo")
+    return (data.get("result") or {}) if ok else {}
+
+
 def set_webhook(token: str, url: str, secret: str) -> tuple[bool, str | None]:
     if not token or not url:
         return False, "немає токена або URL"
@@ -189,95 +200,167 @@ def _pair(symbol: str) -> str:
     return s
 
 
+def _pips_text(a, b) -> str:
+    """Distance between two prices in pips, always with a sign-free magnitude."""
+    try:
+        return f"{abs(float(a) - float(b)) / 0.0001:.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _news_badge(raw: str) -> str:
+    """Turn the internal news code into a sentence a person reads without decoding.
+
+    The engine stores values like "NONE: чисто" or "BLOCKED: CPI за 12 хв". Sentinel
+    words such as NONE never reach the reader, because a code in a trading message
+    reads like an error instead of a state.
+    """
+    text = str(raw or "").strip()
+    code, _, reason = text.partition(":")
+    code = code.strip().upper()
+    reason = reason.strip()
+    if code == "NONE" or not code:
+        return "✅ Новини: вільно" + (f" — {_esc(reason)}" if reason and reason.lower() != "чисто" else "")
+    if code == "UNKNOWN":
+        return "❔ Новини: календар недоступний, вхід заблоковано"
+    if code == "ELEVATED":
+        return f"⚠️ Новини: підвищений ризик — {_esc(reason)}"
+    if code == "BLOCKED":
+        return f"⛔ Новини: вхід заборонено — {_esc(reason)}"
+    return f"⚠️ Новини: {_esc(text)}"
+
+
 def format_signal(sig: dict) -> str:
+    """One signal, readable on a phone in a couple of glances.
+
+    The order is deliberate: what to do, at what price, where the risk is, and where
+    it ends. Context and reasoning come after, because they are read once and the
+    prices are read every few minutes. Emoji carry the state so the eye can skip
+    straight to the row it needs.
+    """
     ctx = sig.get("context", {})
     pos = sig.get("position_size", {})
+    side = str(sig.get("side", "")).upper()
+    arrow = "🟢 BUY" if side == "BUY" else "🔴 SELL"
+    status = str(sig.get("status", ""))
+    status_icon = {
+        "READY": "🟡 готовий",
+        "ACTIVE": "🔵 в угоді",
+        "TP1_HIT": "✅ TP1 узято",
+        "TP2_HIT": "✅ TP2 узято",
+        "WATCHLIST": "👀 спостереження",
+        "STOPPED": "🛑 стоп",
+        "CANCELLED": "⚪ скасовано",
+        "EXPIRED": "⌛ прострочено",
+    }.get(status, status)
+    tp3 = _f5(sig["tp3"]) if sig.get("tp3") else "—"
+
     lines = [
-        f"<b>{_esc(_pair(sig['symbol']))} | {sig['side']}</b>",
+        f"<b>{_esc(_pair(sig['symbol']))} · {arrow}</b>",
+        f"{status_icon} · рейтинг <b>{sig['grade']}</b> · {sig['score']}/100",
+        f"{warsaw_clock(_dt(sig['created_at']))} за Варшавою · сесія {_esc(sig['session'])}",
         "",
-        f"Статус: <b>{sig['status']}</b>",
-        f"Рейтинг: <b>{sig['grade']}</b>",
-        f"Score: <b>{sig['score']}/100</b> <i>(відповідність правилам, не ймовірність)</i>",
+        "<b>Ціни</b>",
+        f"┌ Вхід: <b>{_f5(sig['entry_low'])} – {_f5(sig['entry_high'])}</b>",
+        f"├ Тригер: <b>{_f5(sig['trigger'])}</b>",
+        f"├ Стоп: <b>{_f5(sig['stop'])}</b>  (−{sig['risk_pips']} pips)",
+        f"├ TP1: <b>{_f5(sig['tp1'])}</b>  (+{_pips_text(sig['trigger'], sig['tp1'])} pips)",
+        f"├ TP2: <b>{_f5(sig['tp2'])}</b>  (+{_pips_text(sig['trigger'], sig['tp2'])} pips)",
+        f"└ TP3: <b>{tp3}</b>",
         "",
-        f"Час: {warsaw_clock(_dt(sig['created_at']))} Europe/Warsaw",
-        f"Сесія: {_esc(sig['session'])}",
-        f"ID: <code>{sig['id']}</code>",
+        f"<b>Ризик/прибуток 1:{sig['rr']}</b> · тримати {sig['expected_hold_min']}–{sig['max_hold_min']} хв",
+        f"Позиція {pos.get('lots', 0)} lot · ризик {pos.get('risk_amount', 0)} USD",
         "",
-        f"<b>Entry zone:</b> {_f5(sig['entry_low'])} – {_f5(sig['entry_high'])}",
-        f"<b>Entry trigger:</b> {_f5(sig['trigger'])}",
-        f"<b>Stop Loss:</b> {_f5(sig['stop'])} <i>({sig['risk_pips']} pips)</i>",
-        f"<b>TP1:</b> {_f5(sig['tp1'])}",
-        f"<b>TP2:</b> {_f5(sig['tp2'])}",
-        f"<b>TP3:</b> {_f5(sig['tp3']) if sig.get('tp3') else '— (сценарій із двома цілями)'}",
-        "",
-        f"Risk/Reward: <b>1:{sig['rr']}</b> (до TP1)",
-        f"Орієнтовний час угоди: {sig['expected_hold_min']}–{sig['max_hold_min']} хв",
-        f"Максимальний час утримання: {sig['max_hold_min']} хв",
-        "",
-        "<b>Ринковий контекст</b>",
-        f"Структура H4: {_esc(ctx.get('h4', '—'))}",
-        f"Структура H1: {_esc(ctx.get('h1', '—'))}",
-        f"Підтвердження M15: {_esc(ctx.get('m15', '—'))}",
-        f"Тригер M5: {_esc(ctx.get('m5', '—'))}",
+        "<b>Чому</b> <i>(score — відповідність правилам, не ймовірність)</i>",
+        f"{_esc(ctx.get('h4', '—'))} · {_esc(ctx.get('h1', '—'))}",
+        f"{_esc(ctx.get('m15', '—'))}",
+        f"M5: {_esc(ctx.get('m5', '—'))}",
         f"Ліквідність: {_esc(ctx.get('liquidity', '—'))}",
-        f"Ключові рівні: {_esc(ctx.get('levels', '—'))}",
+        f"Рівні: {_esc(ctx.get('levels', '—'))}",
         "",
-        f"<b>Новинний ризик:</b> {_esc(sig.get('news_risk', '—'))}",
-        f"<b>Spread:</b> {sig['spread_at_creation']} pips",
-        f"<b>Джерело ціни:</b> {_esc(sig['provider'])}",
-        f"<b>Ціна на момент створення:</b> {_f5(sig['quote_at_creation'])}",
-        "",
-        "<b>Чому саме цей сигнал:</b>",
         *[f"• {_esc(w)}" for w in sig.get("why", [])],
         "",
-        "<b>Що скасує сценарій:</b>",
-        *[f"• {_esc(w)}" for w in sig.get("cancel_rules", [])],
-        "",
-        "<b>За яких умов не відкривати:</b>",
-        *[f"• {_esc(w)}" for w in sig.get("invalidations", [])],
-        "",
-        f"Позиція: <b>{pos.get('lots', 0)}</b> lot · ризик {pos.get('risk_amount', 0)} USD",
-        f"<i>{_esc(pos.get('note', ''))}</i>",
-        "",
-        "<i>Це аналітика, не наказ брокеру. Виконання — вручну.</i>",
+        f"{_news_badge(sig.get('news_risk', ''))}",
+        f"Спред: {sig['spread_at_creation']} pips (припущення) · ціна на вході {_f5(sig['quote_at_creation'])}",
+        f"Джерело: {_esc(sig['provider'])} · <code>{sig['id']}</code>",
     ]
+
+    cancel = [*sig.get("cancel_rules", []), *sig.get("invalidations", [])]
+    if cancel:
+        lines += ["", "<b>Скасовує сценарій</b>", *[f"• {_esc(w)}" for w in cancel]]
+
+    lines += ["", "<i>Аналітика, не наказ брокеру. Виконання вручну.</i>"]
     return "\n".join(lines)
 
 
 def format_update(sig: dict, note: str) -> str:
+    """A state change on an open signal, short enough to read as a notification."""
     r = sig.get("r_result")
-    r_line = f"Результат: <b>{'+' if (r or 0) > 0 else ''}{r}R</b>" if r is not None else ""
-    return "\n".join(filter(None, [
-        f"<b>Оновлення {_esc(_pair(sig['symbol']))} {sig['side']}</b>",
-        f"ID: <code>{sig['id']}</code>",
-        f"Статус: <b>{sig['status']}</b>",
+    side = "🟢 BUY" if sig.get("side") == "BUY" else "🔴 SELL"
+    status = str(sig.get("status", ""))
+    icon = {
+        "ACTIVE": "🔵 вхід виконано",
+        "TP1_HIT": "✅ TP1 взято",
+        "TP2_HIT": "✅ TP2 взято",
+        "TP3_HIT": "🎯 TP3 взято",
+        "SL_HIT": "🛑 стоп",
+        "CANCELLED": "⚪ скасовано",
+        "EXPIRED": "⌛ прострочено",
+        "UNDETERMINED": "❔ результат неясний",
+    }.get(status, status)
+
+    r_line = ""
+    if r is not None:
+        r_line = f"Результат: <b>{r:+.2f}R</b>" if r else "Результат: <b>0.00R</b>"
+
+    lines = [
+        f"<b>{_esc(_pair(sig['symbol']))} {side}</b>",
+        f"{icon}",
         r_line,
         "",
         _esc(note),
-    ]))
+        "",
+        f"<sub>{warsaw_clock(_dt(sig['updated_at'] or sig['created_at']))} · <code>{sig['id']}</code></sub>",
+    ]
+    return "\n".join([line for line in lines if line is not None])
 
 
 def format_now(snap, frames, session, news) -> str:
     q = snap.quote
     if q is None:
-        head = "<b>DATA UNAVAILABLE</b>"
+        head = "⛔ Ціна недоступна"
     else:
-        head = f"Ціна: <b>{_f5(q.mid)}</b>\nBid / Ask: {_f5(q.bid)} / {_f5(q.ask)} · spread {q.spread_pips} pips"
-    return "\n".join([
+        head = f"Ціна: <b>{_f5(q.mid)}</b>\nBid / Ask: {_f5(q.bid)} / {_f5(q.ask)} · спред {q.spread_pips} pips"
+
+    quality = {
+        "VERIFIED": "✅ дані перевірені",
+        "STALE": "⚠️ дані застарілі",
+        "INSUFFICIENT": "⚠️ даних замало",
+        "UNAVAILABLE": "⛔ даних немає",
+    }.get(str(snap.quality.status), str(snap.quality.status))
+
+    def struct(tf: str) -> str:
+        f = frames[tf]
+        return f"{tf} <b>{f.structure}</b>"
+
+    kill = f" · {session.killzone_label}" if getattr(session, "in_killzone", False) else ""
+    lines = [
         "<b>EUR/USD — стан ринку</b>",
-        f"Час: {warsaw_str()} (Europe/Warsaw)",
-        f"Сесія: <b>{session.active}</b>{' · ' + session.killzone_label if session.in_killzone else ''} · {session.quality}",
+        f"{warsaw_str()} за Варшавою",
+        f"Сесія: <b>{session.active}</b>{kill} · {session.quality}",
         "",
         head,
-        f"Джерело: {_esc(q.provider) if q else '—'}",
-        f"Якість даних: <b>{snap.quality.status}</b>",
+        quality,
         "",
         "<b>Структура</b>",
-        " · ".join(f"{tf} {frames[tf].structure}" for tf in ("H4", "H1", "M15", "M5")),
-        f"ATR M15: {frames['M15'].atr / 0.0001:.1f} pips · RSI H1: {frames['H1'].rsi14:.0f}",
+        f"{struct('H4')} · {struct('H1')}",
+        f"{struct('M15')} · {struct('M5')}",
+        f"ATR M15 {frames['M15'].atr / 0.0001:.1f} pips · RSI H1 {frames['H1'].rsi14:.0f}",
         "",
-        f"<b>Новини:</b> {news.level} — {_esc(news.reason)}",
-    ])
+        _news_badge(news.level + ": " + news.reason),
+        f"<i>{_esc(q.provider) if q else '—'}</i>",
+    ]
+    return "\n".join(lines)
 
 
 def format_calendar(events: list[dict], now: datetime, limit: int = 10) -> str:
@@ -352,6 +435,91 @@ def format_brief(snap, frames, session, news, events, label: str, levels=None) -
         "<i>Сигнал надійде лише за підтвердженням ціною. Відсутність сигналу — теж результат.</i>",
         "<i>Команди: /now /bias /calendar /session /setups /stats /history /why</i>",
     ]
+    return "\n".join(lines)
+
+
+def format_stats(signals: list[dict], equity: float, start_equity: float, risk_percent: float) -> str:
+    """The report that answers "does this system actually work?".
+
+    Honest by design: it separates signals still open, shows the sample size, and
+    refuses to claim an edge from a handful of trades. Percentages on a small sample
+    are misleading, so a warning appears until there is enough data to mean something.
+    """
+    final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None]
+    # "Open" means "no result yet". Counting by status would double-count TP hits,
+    # which stay listed in the open set while already carrying a result.
+    open_now = [s for s in signals if not (s.get("resolved_at") and s.get("r_result") is not None)]
+    wins = [s for s in final if s["r_result"] > 0]
+    losses = [s for s in final if s["r_result"] < 0]
+    flat = [s for s in final if s["r_result"] == 0]
+    total_r = sum(s["r_result"] for s in final)
+    decided = len(wins) + len(losses)
+    win_rate = (len(wins) / decided * 100) if decided else 0.0
+
+    def avg(rows: list[dict]) -> float:
+        return sum(r["r_result"] for r in rows) / len(rows) if rows else 0.0
+
+    lines = ["<b>📊 Статистика</b>", ""]
+
+    if not signals:
+        lines += [
+            "Ще немає жодного сигналу.",
+            "",
+            "<i>Система мовчить, коли ринок не дає підтвердження. "
+            "Це не помилка — це і є її правило.</i>",
+        ]
+        return "\n".join(lines)
+
+    lines += [
+        f"Усього сигналів: <b>{len(signals)}</b>",
+        f"Завершено: <b>{len(final)}</b> · відкрито: <b>{len(open_now)}</b>",
+        "",
+        "<b>Результат</b>",
+        f"Сумарно: <b>{total_r:+.2f}R</b>",
+        f"Капітал: {start_equity} → <b>{equity:.2f} USD</b>",
+        f"Виграшів: <b>{len(wins)}</b> · програшів: <b>{len(losses)}</b>"
+        + (f" · без результату: {len(flat)}" if flat else ""),
+    ]
+    if decided:
+        lines.append(f"Відсоток виграшів: <b>{win_rate:.0f}%</b> з {decided} вирішених")
+        lines += [
+            f"Середній виграш: {avg(wins):+.2f}R",
+            f"Середній програш: {avg(losses):+.2f}R",
+        ]
+        if losses and wins:
+            lines.append(f"Очікування на угоду: <b>{total_r / decided:+.2f}R</b>")
+
+    by_grade: dict[str, list[dict]] = {}
+    for s in final:
+        by_grade.setdefault(str(s.get("grade", "?")), []).append(s)
+    if by_grade:
+        lines += ["", "<b>За рейтингом</b>"]
+        for grade in sorted(by_grade, reverse=True):
+            rows = by_grade[grade]
+            good = len([r for r in rows if r["r_result"] > 0])
+            lines.append(f"{grade}: {len(rows)} угод · {good} у плюс · {sum(r['r_result'] for r in rows):+.2f}R")
+
+    by_session: dict[str, list[dict]] = {}
+    for s in final:
+        by_session.setdefault(str(s.get("session", "—")), []).append(s)
+    if len(by_session) > 1:
+        lines += ["", "<b>За сесією</b>"]
+        for name, rows in sorted(by_session.items(), key=lambda kv: -sum(r["r_result"] for r in kv[1])):
+            lines.append(f"{name}: {len(rows)} · {sum(r['r_result'] for r in rows):+.2f}R")
+
+    hit = len([s for s in final
+               if (s.get("resolution") or {}).get("status") in ("TP2_HIT", "TP3_HIT", "TP1_HIT")])
+    if final:
+        lines.append(f"\nДійшли до цілі: <b>{hit}</b> з {len(final)} · стоп: "
+                     f"<b>{len([s for s in final if (s.get('resolution') or {}).get('status') == 'SL_HIT'])}</b>")
+
+    if decided < 30:
+        lines += [
+            "",
+            f"⚠️ <i>Лише {decided} вирішених угод. Для висновків потрібно мінімум 30–50. "
+            "Поки це спостереження, а не доведена перевага.</i>",
+        ]
+    lines += ["", "<i>Віртуальний облік. Реальні накази не надсилались.</i>"]
     return "\n".join(lines)
 
 

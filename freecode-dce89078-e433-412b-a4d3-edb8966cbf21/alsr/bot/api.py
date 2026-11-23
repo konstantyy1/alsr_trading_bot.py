@@ -15,7 +15,7 @@ from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
-VERSION = "2.0.0"
+VERSION = "2.2.0"
 _started_at = datetime.now(timezone.utc)
 
 # A snapshot costs 4-5 upstream requests, so cache it briefly for the dashboard.

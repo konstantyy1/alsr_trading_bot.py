@@ -12,21 +12,31 @@ from markettime import day_bounds, news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
 HELP_TEXT = "\n".join([
-    "🔒 <b>Приватний EUR/USD термінал</b>",
+    "🔒 <b>EUR/USD термінал</b>",
+    "<i>Кілька команд — і весь стан ринку з телефона.</i>",
     "",
+    "<b>Швидко глянути</b>",
+    "/now — ціна, структура, сесія, новини",
+    "/bias — напрямок H4 і H1",
+    "/session — котра сесія зараз",
+    "",
+    "<b>Сценарії й результат</b>",
+    "/setups — відкриті сценарії",
+    "/stats — статистика і відсоток виграшів",
+    "/history — останні сигнали",
+    "/why — чому останнє рішення таке",
+    "",
+    "<b>Новини</b>",
+    "/calendar — що буде попереду",
+    "/news — що вже вийшло",
+    "",
+    "<b>Керування</b>",
     "/status — стан системи",
-    "/now — поточний аналіз",
-    "/bias — напрямок H4/H1",
-    "/calendar — найближчі події",
-    "/news — останні події",
-    "/session — активна сесія",
-    "/setups — активні сценарії",
-    "/stats — статистика",
-    "/history — історія сигналів",
-    "/why — останнє рішення",
-    "/pause, /resume — керування сигналами",
+    "/pause — зупинити нові сигнали",
+    "/resume — відновити",
+    "/help — цей список",
     "",
-    "<i>Це аналітика, не наказ брокеру.</i>",
+    "<i>Аналітика, не наказ брокеру.</i>",
 ])
 
 
@@ -71,14 +81,26 @@ def handle_command(store: Store, text: str) -> str:
         session = session_info(now)
         if cmd == "/bias":
             f = frames
+
+            def note(tf: str) -> str:
+                fr = f[tf]
+                if fr.choch:
+                    return f" · злам ({fr.choch['dir']})"
+                if fr.bos:
+                    return f" · пробій {fr.bos['dir']}"
+                return ""
+
+            trend = "висхідний" if f["H4"].structure == "bull" else "низхідний" if f["H4"].structure == "bear" else "боковий"
             return "\n".join([
-                "<b>Bias EUR/USD</b>",
-                f"H4: <b>{f['H4'].structure}</b>" + (f" (BOS {f['H4'].bos['dir']})" if f['H4'].bos else ""),
-                f"H1: <b>{f['H1'].structure}</b>" + (f" (CHoCH {f['H1'].choch['dir']})" if f['H1'].choch else f" (BOS {f['H1'].bos['dir']})" if f['H1'].bos else ""),
+                f"<b>Напрямок EUR/USD: {trend}</b>",
+                "",
+                f"H4: <b>{f['H4'].structure}</b>{note('H4')}",
+                f"H1: <b>{f['H1'].structure}</b>{note('H1')}",
                 f"M15: {f['M15'].structure} · M5: {f['M5'].structure}",
-                f"ATR M15: {f['M15'].atr / PIP:.1f} pips",
-                f"Якість даних: {snap.quality.status}",
-                f"Час: {warsaw_str(now)}",
+                "",
+                f"ATR M15 {f['M15'].atr / PIP:.1f} pips · RSI H1 {f['H1'].rsi14:.0f}",
+                f"{warsaw_str(now)} за Варшавою",
+                "<i>Напрямок — це контекст, не сигнал на вхід.</i>",
             ])
         events = store.list_events(now - timedelta(days=1), now + timedelta(days=7))
         risk = news_risk(events, now, ENV.data.news_blackout_before_min, ENV.data.news_blackout_after_min)
@@ -128,29 +150,28 @@ def handle_command(store: Store, text: str) -> str:
         recent = store.list_signals(limit=12)
         if not recent:
             return "Історія порожня."
+        status_word = {
+            "READY": "🟡 готовий", "ACTIVE": "🔵 в угоді", "WATCHLIST": "👀 спостерігаю",
+            "TP1_HIT": "✅ TP1", "TP2_HIT": "✅ TP2", "TP3_HIT": "✅ TP3",
+            "SL_HIT": "🛑 стоп", "CANCELLED": "⚪ скасовано", "EXPIRED": "⌛ прострочено",
+        }
         lines = ["<b>Останні сигнали</b>", ""]
         for s in recent:
             r = s.get("r_result")
-            r_txt = f" ({r:+.2f}R)" if r is not None else ""
-            lines.append(f"• {_fmt_iso(s['created_at'])} {s['side']} {s['grade']} {s['status']}{r_txt} · <code>{s['id']}</code>")
+            r_txt = f" · <b>{r:+.2f}R</b>" if r is not None else ""
+            icon = status_word.get(str(s.get("status")), str(s.get("status")))
+            arrow = "🟢" if s.get("side") == "BUY" else "🔴"
+            lines.append(f"{arrow} <b>{_fmt_iso(s['created_at'])}</b> · {s.get('grade','')} · {icon}{r_txt}")
+        lines += ["", "<i>/stats — повна статистика</i>"]
         return "\n".join(lines)
 
     if cmd == "/stats":
         all_signals = store.list_signals(limit=500)
-        summary = positions_summary(all_signals)
         equity = ENV.risk.account_equity
-        for s in sorted([x for x in all_signals if x.get("resolved_at") and x.get("r_result") is not None], key=lambda x: x["resolved_at"]):
+        for s in sorted([x for x in all_signals if x.get("resolved_at") and x.get("r_result") is not None],
+                        key=lambda x: x["resolved_at"]):
             equity += equity * (ENV.risk.risk_percent / 100) * s["r_result"]
-        lines = [
-            "<b>Статистика (віртуальний облік)</b>",
-            f"Всього: {len(all_signals)} · завершено: {summary['closed']} · відкрито: {summary['open']}",
-            f"Перемог / збитків: {summary['wins']} / {summary['losses']}",
-            f"Сумарно: <b>{summary['total_r']:+.2f}R</b>",
-            f"Капітал: {ENV.risk.account_equity} → <b>{equity:.2f} USD</b>",
-        ]
-        if summary["closed"] < 100:
-            lines.append(f"\n⚠️ Лише {summary['closed']} завершених угод. Висновки попередні.")
-        return "\n".join(lines)
+        return notify.format_stats(all_signals, equity, ENV.risk.account_equity, ENV.risk.risk_percent)
 
     if cmd == "/why":
         decisions = store.list_decisions(1)

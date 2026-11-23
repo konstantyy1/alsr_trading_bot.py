@@ -41,6 +41,7 @@ _STORE = Store(ENV.database_url)
 _STORE_LOCK = threading.Lock()
 _SELF_TEST_CACHE: dict = {"at": 0.0, "report": None}
 _SCANNING = threading.Lock()
+_WEBHOOK_CHECKED_AT: float = 0.0
 
 
 def get_store() -> Store:
@@ -154,11 +155,14 @@ def _service_base(environ=None, env=None) -> str:
     return ""
 
 
-def ensure_webhook(store=None, environ=None, env=None) -> str:
-    """Register the webhook once, so commands answer immediately.
+def ensure_webhook(store=None, environ=None, env=None, force: bool = False) -> str:
+    """Register the webhook and keep it pointing at this service.
 
-    Without it Telegram keeps updates in a queue that only the five-minute scan
-    drains, and /help appears to do nothing. Returns a short status for logging.
+    Two failure modes make the bot look dead while every other check passes:
+    no webhook at all (Telegram queues the command until the next scan), and a
+    webhook left over from an earlier deploy pointing at a stale address (Telegram
+    posts there, gets an error and retries forever). Both are repaired here, and
+    the last Telegram delivery error is treated as proof the address is wrong.
     """
     env = env or ENV
     token = env.telegram_token
@@ -168,8 +172,10 @@ def ensure_webhook(store=None, environ=None, env=None) -> str:
         return "skip:немає URL або токена"
 
     target = f"{base}/telegram/{secret}"
-    url, err = notify.webhook_state(token)
-    if err is None and url == target:
+    info = notify.webhook_info(token)
+    url = info.get("url") or ""
+    broken = bool(info.get("last_error_message"))
+    if not force and url == target and not broken:
         return "ok:вже налаштовано"
 
     ok, serr = notify.set_webhook(token, target, secret)
@@ -177,11 +183,16 @@ def ensure_webhook(store=None, environ=None, env=None) -> str:
         return f"error:{serr}"
     if store is not None:
         store.set_setting("webhook_url", target)
-    return "ok:зареєстровано"
+    return "ok:виправлено" if url and url != target else "ok:зареєстровано"
 
 
 def register_webhook_if_needed(environ=None) -> None:
-    """Best effort at start-up. A failure must never stop the service."""
+    """Best effort, throttled to one Telegram check every few minutes."""
+    global _WEBHOOK_CHECKED_AT
+    now = time.time()
+    if now - _WEBHOOK_CHECKED_AT < 180:
+        return
+    _WEBHOOK_CHECKED_AT = now
     try:
         status = ensure_webhook(_STORE, environ, ENV)
         if status.startswith("error"):
@@ -286,7 +297,36 @@ code{background:#0b0f14;border:1px solid #222d3a;border-radius:6px;padding:2px 6
 
 
 def route_status(environ, start_response):
-    return _json(environ, start_response, 200, api.status_payload(_STORE))
+    payload = api.status_payload(_STORE)
+    # A webhook pointing at a stale address is invisible from every other check:
+    # Telegram keeps retrying, nothing arrives, and the bot looks dead. Show it.
+    try:
+        info = notify.webhook_info(ENV.telegram_token)
+        if info:
+            payload["webhook"] = {
+                "url": info.get("url") or "",
+                "pending": info.get("pending_update_count", 0),
+                "last_error": info.get("last_error_message") or "",
+                "last_error_at": info.get("last_error_date"),
+                "expected": f"{_service_base(environ)}/telegram/{effective_webhook_secret()}",
+            }
+    except Exception:  # noqa: BLE001
+        pass
+    return _json(environ, start_response, 200, payload)
+
+
+def route_webhook_repair(environ, start_response):
+    """Force the webhook back to this service's own address and report the truth."""
+    status = ensure_webhook(_STORE, environ, ENV, force=True)
+    info = notify.webhook_info(ENV.telegram_token)
+    _STORE.log("info" if status.startswith("ok") else "warn", "telegram", f"вебхук: {status}")
+    return _json(environ, start_response, 200, {
+        "status": status,
+        "url": info.get("url") or "",
+        "pending": info.get("pending_update_count", 0),
+        "last_error": info.get("last_error_message") or "",
+        "expected": f"{_service_base(environ)}/telegram/{effective_webhook_secret()}",
+    })
 
 
 def route_market(environ, start_response):
@@ -424,13 +464,14 @@ def route_telegram(environ, start_response, secret: str) -> list:
 
     from commands import handle_command
 
+    _STORE.log("info", "telegram", f"команда {text[:40]}")
     try:
         reply = handle_command(_STORE, text)
     except Exception as exc:  # noqa: BLE001
         reply = f"Помилка обробки команди: {notify._esc(exc)}"
     ok, err = notify.send(ENV.telegram_token, incoming_chat or bound, reply)
     if not ok:
-        _STORE.log("error", "telegram", str(err))
+        _STORE.log("error", "telegram", f"відповідь не пішла: {err}")
     return _json(environ, start_response, 200, {"ok": True})
 
 
@@ -457,13 +498,12 @@ def application(environ, start_response):
     if path.startswith("/telegram/"):
         return route_telegram(environ, start_response, path[len("/telegram/"):])
 
-    # Self-heal: if the webhook is missing (fresh deploy, wiped SQLite), register it
-    # on the first authenticated request. Telegram then delivers commands instantly
-    # instead of waiting for the next five-minute scan.
+    # Self-heal: keep the webhook pointing at this service. Telegram queues commands
+    # when none is set, and keeps posting to a stale address after a deploy, so this
+    # runs on the first authenticated request instead of trusting the last setup.
     if path in ("/api/status", "/api/scan") and _authorized(environ, query):
         try:
-            if notify.webhook_state(ENV.telegram_token)[0] == "":
-                register_webhook_if_needed(environ)
+            register_webhook_if_needed(environ)
         except Exception:  # noqa: BLE001 - never block a request on this
             pass
 
@@ -484,6 +524,7 @@ def application(environ, start_response):
         "/api/telegram/discover": route_telegram_discover,
         "/api/telegram/hello": route_telegram_hello,
         "/api/telegram/bind": route_telegram_bind,
+        "/api/telegram/webhook-fix": route_webhook_repair,
     }
     if path in POST_ROUTES:
         if not _authorized(environ, query):

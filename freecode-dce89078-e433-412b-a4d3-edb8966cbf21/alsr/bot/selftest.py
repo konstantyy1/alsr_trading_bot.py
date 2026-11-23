@@ -262,12 +262,17 @@ def test_prev_day_skips_empty_sunday() -> tuple[bool, str]:
 
 # ---------------------------------------------------------------- messaging & risk
 def test_signal_template() -> tuple[bool, str]:
+    """Every promised field must survive a redesign of the message.
+
+    The layout changed to be read on a phone, so the labels are checked by what they
+    carry rather than by their old wording: each price, the risk, the reasoning and
+    the disclaimer must still be present.
+    """
     text = format_signal(_signal())
     required = [
-        "Статус", "Рейтинг", "Score", "Entry zone", "Entry trigger", "Stop Loss",
-        "TP1", "TP2", "TP3", "Risk/Reward", "час утримання", "Ринковий контекст",
-        "Новинний ризик", "Spread", "Джерело ціни", "Чому саме цей сигнал",
-        "Що скасує сценарій", "За яких умов не відкривати", "аналітика, не наказ",
+        "рейтинг", "100", "Вхід", "Тригер", "Стоп", "TP1", "TP2", "TP3",
+        "Ризик/прибуток", "хв", "Чому", "відповідність правилам",
+        "Новини", "Спред", "Джерело", "Скасовує сценарій", "не наказ брокеру",
     ]
     missing = [k for k in required if k not in text]
     return not missing, "all template sections present" if not missing else f"missing {missing}"
@@ -307,7 +312,7 @@ def test_store_dedupe() -> tuple[bool, str]:
 def test_score_is_not_winrate() -> tuple[bool, str]:
     text = format_signal(_signal())
     ok = "відповідність правилам, не ймовірність" in text
-    return ok, "score labelled as rule compliance"
+    return ok, "score labelled as rule compliance" if ok else "score not labelled"
 
 
 def test_pair_label() -> tuple[bool, str]:
@@ -603,23 +608,29 @@ def test_webhook_gives_instant_replies() -> tuple[bool, str]:
 
     original_store = web._STORE
     original_env = web.ENV
-    original_state, original_set, original_send = (
-        web.notify.webhook_state, web.notify.set_webhook, web.notify.send
+    original_info, original_set, original_send = (
+        web.notify.webhook_info, web.notify.set_webhook, web.notify.send
     )
+    original_chat_id = web.chat_id
     try:
         web._STORE = Store("", sqlite_path=os.path.join(tempfile.mkdtemp(), "hook.db"))
         # A deterministic secret needs a token to derive it from. The real service
         # always has DASHBOARD_TOKEN; the test supplies one so it does not depend on
         # whatever environment happens to be set.
-        web.ENV = dataclasses.replace(original_env, dashboard_token="dash-test-token",
+        web.ENV = dataclasses.replace(original_env, dashboard_token="FAKE-dashboard-token-for-test",
                                       scan_token="", webhook_secret="", public_url="",
-                                      telegram_token="123:test-token")
+                                      telegram_token="FAKE-bot-token-for-test",
+                                      telegram_chat_id="")
+        # chat_id() reads config.ENV, not web.ENV, so the owner's real TELEGRAM_CHAT_ID
+        # would reject the test's fake chat and make this check fail on a healthy
+        # service. Patch it to look like a bot nobody has messaged yet.
+        web.chat_id = lambda store: ""
         secret = web.effective_webhook_secret()
         if not secret:
             return False, "секрет не визначено"
 
         registered = {}
-        web.notify.webhook_state = lambda token: ("", None)
+        web.notify.webhook_info = lambda token: {"url": "", "last_error_message": ""}
         web.notify.set_webhook = lambda token, url, sec: (registered.update(url=url, sec=sec) or True, None)
         status = web.ensure_webhook(web._STORE, {"HTTP_X_FORWARDED_HOST": "alsr-bot.onrender.com"}, web.ENV)
         built = registered.get("url", "")
@@ -648,9 +659,55 @@ def test_webhook_gives_instant_replies() -> tuple[bool, str]:
     finally:
         web._STORE = original_store
         web.ENV = original_env
-        web.notify.webhook_state = original_state
+        web.chat_id = original_chat_id
+        web.notify.webhook_info = original_info
         web.notify.set_webhook = original_set
         web.notify.send = original_send
+
+
+def test_stale_webhook_is_repaired() -> tuple[bool, str]:
+    """A webhook left on an old address must be moved back, not trusted.
+
+    Telegram keeps posting to whatever URL was registered last. After a rename or a
+    changed secret that address stops working, Telegram retries silently and every
+    command looks ignored — the page and the API look perfectly healthy meanwhile.
+    """
+    import dataclasses
+    import tempfile
+
+    import web
+    from store import Store
+
+    original_store, original_env = web._STORE, web.ENV
+    original_info, original_set = web.notify.webhook_info, web.notify.set_webhook
+    try:
+        web._STORE = Store("", sqlite_path=os.path.join(tempfile.mkdtemp(), "stale.db"))
+        web.ENV = dataclasses.replace(original_env, dashboard_token="FAKE-dashboard-token-for-test",
+                                      scan_token="", webhook_secret="", public_url="",
+                                      telegram_token="FAKE-bot-token-for-test", telegram_chat_id="")
+        host = {"HTTP_X_FORWARDED_HOST": "alsr-bot.onrender.com"}
+        secret = web.effective_webhook_secret()
+        good = f"https://alsr-bot.onrender.com/telegram/{secret}"
+
+        cases = [
+            ("стара адреса", {"url": "https://old-name.onrender.com/telegram/x", "last_error_message": ""}, True),
+            ("помилка доставки", {"url": good, "last_error_message": "Wrong response from the webhook: 403"}, True),
+            ("уже правильно", {"url": good, "last_error_message": ""}, False),
+        ]
+        results = []
+        for label, info, must_fix in cases:
+            calls = []
+            web.notify.webhook_info = lambda token, _i=info: dict(_i)
+            web.notify.set_webhook = lambda token, url, sec: (calls.append(url) or True, None)
+            status = web.ensure_webhook(web._STORE, host, web.ENV)
+            fixed = bool(calls) and calls[0] == good
+            results.append(fixed == must_fix and status.startswith("ok"))
+            if not results[-1]:
+                return False, f"{label}: status={status}, викликів={len(calls)}"
+        return all(results), "стара=виправлено, помилка=виправлено, correct=без змін"
+    finally:
+        web._STORE, web.ENV = original_store, original_env
+        web.notify.webhook_info, web.notify.set_webhook = original_info, original_set
 
 
 def test_news_feed_down_blocks() -> tuple[bool, str]:
@@ -679,6 +736,7 @@ TESTS = [
     ("Scheduled briefings stay quiet", test_scheduled_briefings_not_spammy),
     ("Telegram commands advance offset", test_command_offset_advances),
     ("Instant command replies (webhook)", test_webhook_gives_instant_replies),
+    ("Stale webhook is repaired", test_stale_webhook_is_repaired),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),
