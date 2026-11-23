@@ -500,6 +500,92 @@ def test_scan_token_accepted() -> tuple[bool, str]:
                 f"dashboard={dash_scan}, wrong={wrong}, empty={empty}")
 
 
+def test_scheduled_briefings_not_spammy() -> tuple[bool, str]:
+    """A quiet day must produce a handful of useful messages, not dozens.
+
+    The morning brief, three session check-ins and the daily summary already had
+    formatters but nothing ever called them, so the channel could stay empty all
+    day. Equally, running every 5 minutes must not repeat the same notice: each is
+    claimed by a date key, and a check-in is skipped when something was just sent.
+    """
+    import tempfile
+    from datetime import datetime
+    import types
+
+    import scan
+    from store import Store
+
+    original_send = scan.notify.send
+    original_brief = scan.notify.format_brief
+    original_daily = scan.notify.format_daily
+    original_today = scan._today_signals
+    try:
+        sent: list[str] = []
+        scan.notify.send = lambda token, chat, text: (sent.append(text) or True, None)
+        scan.notify.format_brief = lambda *a, **k: str(a[-1])
+        scan.notify.format_daily = lambda *a, **k: "daily"
+        scan._today_signals = lambda *a, **k: []
+
+        store = Store("", sqlite_path=os.path.join(tempfile.mkdtemp(), "brief.db"))
+        snap = types.SimpleNamespace(quote=None, quality=types.SimpleNamespace(status="VERIFIED"),
+                                     generated_at=datetime(2026, 11, 23, 8, 0))
+        frames = {tf: types.SimpleNamespace(structure="bear") for tf in ("M5", "M15", "H1", "H4")}
+        session = types.SimpleNamespace(active="London", quality="PRIME")
+        news = types.SimpleNamespace(level="NONE")
+
+        # A full quiet day, scanned every 15 minutes.
+        for hour in range(6, 24):
+            for minute in (5, 20, 35, 50):
+                scan._scheduled_briefings(
+                    store, snap, frames, session, news, [],
+                    datetime(2026, 11, 23, hour, minute, tzinfo=WAW),
+                    scan.ScanResult(at=datetime(2026, 11, 23, hour, minute, tzinfo=WAW)),
+                )
+        count = len(sent)
+        kinds = " / ".join(sent)
+        ok = 3 <= count <= 6
+        return ok, f"{count} повідомлень за тихий день: {kinds}"
+    finally:
+        scan.notify.send = original_send
+        scan.notify.format_brief = original_brief
+        scan.notify.format_daily = original_daily
+        scan._today_signals = original_today
+
+
+def test_command_offset_advances() -> tuple[bool, str]:
+    """Commands are read without a webhook, so the offset must move forward.
+
+    Telegram hands each update out only once when the caller passes back the last
+    seen id. Without advancing the offset the bot would answer /status again on
+    every scan.
+    """
+    import notify
+
+    fake = {"ok": True, "result": [{"update_id": 10}, {"update_id": 12}, {"update_id": 11}]}
+    seen = {}
+
+    def fake_get(token, method, timeout=15, query=None):
+        seen.update(query or {})
+        return True, fake, None
+
+    original = notify.api_get
+    try:
+        notify.api_get = fake_get
+        ok, updates, nxt, err = notify.poll_updates("token", 9)
+        first_ok = ok and nxt == 13 and len(updates) == 3
+        # Passing the returned offset back must be sent as-is.
+        notify.poll_updates("token", nxt)
+        pass_back = seen.get("offset") == 13
+        # Re-reading with the advanced offset yields nothing new.
+        fake["result"] = []
+        ok2, updates2, nxt2, _ = notify.poll_updates("token", nxt)
+        empty_ok = ok2 and updates2 == [] and nxt2 == 13
+        return (first_ok and pass_back and empty_ok,
+                f"offset 9→{nxt}, передано назад={pass_back}, без нових={empty_ok}")
+    finally:
+        notify.api_get = original
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -523,6 +609,8 @@ TESTS = [
     ("Telegram chat binding", test_chat_binding),
     ("Calendar XML fallback", test_calendar_xml_fallback),
     ("Scan token triggers a scan only", test_scan_token_accepted),
+    ("Scheduled briefings stay quiet", test_scheduled_briefings_not_spammy),
+    ("Telegram commands advance offset", test_command_offset_advances),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

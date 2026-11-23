@@ -62,12 +62,15 @@ def send(token: str, chat_id: str, text: str, *, disable_preview: bool = True) -
         return False, str(exc)
 
 
-def api_get(token: str, method: str, timeout: int = 15) -> tuple[bool, dict, str | None]:
+def api_get(token: str, method: str, timeout: int = 15, query: dict | None = None) -> tuple[bool, dict, str | None]:
     """Call a read-only Bot API method. Never logs or echoes the token."""
     if not token:
         return False, {}, "токен не заданий"
+    url = f"{API}/bot{token}/{method}"
+    if query:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
     try:
-        with urllib.request.urlopen(f"{API}/bot{token}/{method}", timeout=timeout) as res:
+        with urllib.request.urlopen(url, timeout=timeout) as res:
             data = _json.loads(res.read().decode())
     except urllib.error.HTTPError as exc:
         try:
@@ -114,6 +117,33 @@ def discover_chats(token: str) -> tuple[bool, list[dict], str | None, bool]:
             "username": chat.get("username"),
         }
     return True, list(chats.values()), None, bool(webhook_url)
+
+
+def poll_updates(token: str, offset: int | None = None, timeout: int = 0) -> tuple[bool, list[dict], int | None, str | None]:
+    """Read new messages sent to the bot, without a webhook.
+
+    Telegram only hands updates to getUpdates when no webhook is registered, and
+    only once per update. The caller must store the returned offset and pass it
+    back, otherwise old commands would be replayed on every scan.
+    """
+    ok, data, err = api_get(token, "getUpdates", query={"offset": offset, "timeout": timeout, "limit": 20})
+    if not ok:
+        return False, [], offset, err
+    updates = data.get("result") or []
+    next_offset = offset
+    for update in updates:
+        uid = update.get("update_id")
+        if isinstance(uid, int) and (next_offset is None or uid + 1 > next_offset):
+            next_offset = uid + 1
+    return True, updates, next_offset, None
+
+
+def webhook_state(token: str) -> tuple[str, str | None]:
+    """Return (webhook_url, error). A non-empty url blocks getUpdates."""
+    ok, info, err = api_get(token, "getWebhookInfo")
+    if not ok:
+        return "", err
+    return ((info.get("result") or {}).get("url") or ""), None
 
 
 def set_webhook(token: str, url: str, secret: str) -> tuple[bool, str | None]:
@@ -269,23 +299,60 @@ def format_calendar(events: list[dict], now: datetime, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def format_brief(snap, frames, session, news, events, label: str) -> str:
+def format_brief(snap, frames, session, news, events, label: str, levels=None) -> str:
+    """Session summary designed to be read on a phone, without opening the terminal."""
     q = snap.quote
-    high = [e for e in events if e["impact"] == "high" and e["time_utc"] >= snap.generated_at][:4]
-    return "\n".join([
+    now = snap.generated_at
+
+    def upcoming(impact: str, limit: int) -> list[dict]:
+        return [e for e in events
+                if e["impact"] == impact and e["time_utc"] >= now][:limit]
+
+    high = upcoming("high", 4)
+    medium = upcoming("medium", 3)
+
+    lines = [
         f"<b>{label}</b>",
-        f"{warsaw_str(snap.generated_at)} · Europe/Warsaw",
+        f"{warsaw_str(now)} · Europe/Warsaw",
         "",
         f"EUR/USD <b>{_f5(q.mid)}</b> · {snap.quality.status}" if q else "<b>DATA UNAVAILABLE</b>",
-        f"H4 {frames['H4'].structure} / H1 {frames['H1'].structure} / M15 {frames['M15'].structure}",
-        f"Сесія: {session.active} ({session.quality})",
+        f"H4 {frames['H4'].structure} / H1 {frames['H1'].structure} / "
+        f"M15 {frames['M15'].structure} / M5 {frames['M5'].structure}",
+        f"RSI M15 {getattr(frames['M15'], 'rsi14', 0):.0f} · ATR M15 {getattr(frames['M15'], 'atr', 0) / 0.0001:.1f} pips",
+        f"Сесія: {session.active} ({session.quality})"
+        + (" · killzone" if getattr(session, "in_killzone", False) else ""),
         f"Новинний ризик: {news.level}",
+    ]
+
+    if levels:
+        pick: dict[str, object] = {}
+        for z in levels:
+            pick.setdefault(z.kind, z)
+        parts = []
+        for kind, name, attr in (("DAY_HIGH", "PDH", "high"), ("DAY_LOW", "PDL", "low"),
+                                 ("WEEK_HIGH", "Тиж. max", "high"), ("WEEK_LOW", "Тиж. min", "low")):
+            z = pick.get(kind)
+            if z is not None:
+                parts.append(f"{name} <b>{_f5(getattr(z, attr))}</b>")
+        if parts:
+            lines += ["", "<b>Рівні</b>", " · ".join(parts)]
+
+    if high:
+        lines += ["", "<b>High-impact сьогодні</b>"]
+        lines += [f"• {warsaw_clock(e['time_utc'])} {_esc(e['title'])} ({e['currency']})" for e in high]
+    elif medium:
+        lines += ["", "<b>Найближчі події</b>"]
+        lines += [f"• {warsaw_clock(e['time_utc'])} {_esc(e['title'])} ({e['currency']}, {e['impact']})"
+                  for e in medium]
+    else:
+        lines += ["", "Подій EUR/USD у календарі немає."]
+
+    lines += [
         "",
-        ("<b>High-impact сьогодні:</b>\n" + "\n".join(f"• {warsaw_clock(e['time_utc'])} {_esc(e['title'])}" for e in high))
-        if high else "High-impact подій у календарі немає.",
-        "",
-        "<i>Сигнал надійде лише за підтвердження ціною. Відсутність сигналу — теж результат.</i>",
-    ])
+        "<i>Сигнал надійде лише за підтвердженням ціною. Відсутність сигналу — теж результат.</i>",
+        "<i>Команди: /now /bias /calendar /session /setups /stats /history /why</i>",
+    ]
+    return "\n".join(lines)
 
 
 def format_daily(day: str, signals: list[dict], equity: float, start_equity: float, risk_percent: float) -> str:
