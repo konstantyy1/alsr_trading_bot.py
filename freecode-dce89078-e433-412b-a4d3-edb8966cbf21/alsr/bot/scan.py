@@ -52,6 +52,20 @@ def _send_once(store: Store, key: str, kind: str, text: str, signal_id: str | No
     return "sent", None
 
 
+def calendar_usable(calendar_ok: bool | None, stored_events: list[dict], news_enabled: bool) -> bool:
+    """Can release risk be judged from what we have?
+
+    A successful fetch that happens to contain no EUR/USD releases is a valid
+    answer. A failed fetch is only acceptable if earlier cycles already stored a
+    calendar. Anything else means "unknown", and unknown must block new entries.
+    """
+    if not news_enabled:
+        return True
+    if calendar_ok is True:
+        return True
+    return bool([e for e in stored_events if str(e.get("source", "")).startswith("Economic calendar")])
+
+
 def _today_signals(store: Store, now: datetime) -> list[dict]:
     start, end, _ = day_bounds(now)
     todays = []
@@ -102,15 +116,53 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
 
             # 2) News + calendar.
             events: list[dict] = []
+            # Whether the release calendar could actually be read this cycle. Starts
+            # as "unknown" so a crash inside the block can never look like success.
+            calendar_ok: bool | None = None
             if ENV.enable_news:
                 try:
                     from newsfeed import fetch_calendar, fetch_news
 
-                    cal, cal_status = fetch_calendar()
+                    # The free calendar host rate-limits hard (HTTP 429). Events are
+                    # weekly, so re-reading them every cycle is both wasteful and
+                    # risky: refresh at most every 30 min, and only if the stored
+                    # calendar has expired or is missing.
+                    cal: list[dict] = []
+                    cal_status = None
+                    have_cal = [
+                        e for e in store.list_events(now - timedelta(days=1), now + timedelta(days=7))
+                        if str(e.get("source", "")).startswith("Economic calendar")
+                    ]
+                    last_fetch = store.get_setting("calendar_fetched_at", None)
+                    stale = True
+                    if last_fetch:
+                        try:
+                            fetched = datetime.fromisoformat(str(last_fetch).replace("Z", "+00:00"))
+                            if fetched.tzinfo is None:
+                                fetched = fetched.replace(tzinfo=timezone.utc)
+                            stale = (now - fetched) > timedelta(minutes=30)
+                        except (ValueError, TypeError):
+                            stale = True
+
+                    if have_cal and not stale:
+                        cal = have_cal
+                        calendar_ok = True
+                    else:
+                        cal, cal_status = fetch_calendar()
+                        if cal_status.ok:
+                            store.set_setting("calendar_fetched_at", now.isoformat())
+                            # A successful empty answer is a valid "no releases this
+                            # week"; only a failed request means we cannot judge risk.
+                            calendar_ok = True
+                        else:
+                            # Keep using what we already stored rather than dropping it.
+                            cal = have_cal
+                            calendar_ok = bool(have_cal)
+
                     press, press_statuses = fetch_news()
                     store.save_events(cal + press)
                     events = cal + press
-                    failed = [s for s in [cal_status, *press_statuses] if not s.ok]
+                    failed = [s for s in [cal_status, *press_statuses] if s is not None and not s.ok]
                     if failed:
                         store.log("warn", "news", f"Недоступні фіди: {', '.join(s.source for s in failed)}")
                 except Exception as exc:  # noqa: BLE001
@@ -119,20 +171,18 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
             window_start = now - timedelta(days=1)
             window_end = now + timedelta(days=7)
             stored_events = store.list_events(window_start, window_end) or events
-            # A calendar that returned nothing usable means we cannot judge release
-            # risk. That is different from "no events" and must block new entries.
-            calendar_usable = bool(
-                [e for e in stored_events if e.get("source", "").startswith("Economic calendar")]
-            )
+            # "Feed unreachable" is not the same as "no releases this week". Entries
+            # are blocked only when the request failed and nothing was cached before.
+            usable = calendar_usable(calendar_ok, stored_events, ENV.enable_news)
             risk = news_risk(
                 stored_events,
                 now,
                 ENV.data.news_blackout_before_min,
                 ENV.data.news_blackout_after_min,
-                feed_ok=calendar_usable or not ENV.enable_news,
+                feed_ok=usable,
             )
-            if not calendar_usable and ENV.enable_news:
-                store.log("warn", "news", "Календар порожній — нові входи заблоковано до відновлення фіду.")
+            if not usable:
+                store.log("warn", "news", "Календар недоступний — нові входи заблоковано до відновлення фіду.")
 
             # 3) Decide.
             todays = _today_signals(store, now)

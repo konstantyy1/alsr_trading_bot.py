@@ -51,6 +51,9 @@ def _calendar_self_heal(store: Store, now) -> str | None:
         return f"Календар недоступний: {status.error}"
     if fresh:
         store.save_events(fresh)
+        # Share the fetch time with the scanner so a dashboard refresh does not make
+        # the next scheduled scan hit the feed again.
+        store.set_setting("calendar_fetched_at", now.isoformat())
     return None
 
 
@@ -303,7 +306,9 @@ def calendar_payload(store: Store, days: int = 7, self_heal: bool = False) -> di
         "upcoming": [fmt(e) for e in upcoming[:20]],
         "recent": [fmt(e) for e in past[:10]],
         "counts": {"upcoming": len(upcoming), "recent": len(past)},
-        "note": note or "Порожні actual/forecast/previous означають, що джерело їх не публікує.",
+        # A fetch failure only matters when it left us with nothing to show.
+        "note": (note if note and not upcoming else None)
+        or "Порожні actual/forecast/previous означають, що джерело їх не публікує.",
     }
 
 

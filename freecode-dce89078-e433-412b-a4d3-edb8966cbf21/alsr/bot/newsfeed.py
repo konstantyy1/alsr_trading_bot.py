@@ -6,6 +6,9 @@ actual/forecast/previous, those fields stay empty instead of being invented.
 from __future__ import annotations
 
 import re
+import json
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -116,10 +119,25 @@ def fetch_calendar(timeout: int = 15) -> tuple[list[dict], FeedStatus]:
     """Free weekly economic calendar with real actual/forecast/previous values.
 
     Only EUR and USD rows are kept. Empty strings stay empty — never coerced to 0.
+    The host rate-limits aggressively, so callers must cache the result; a 429 is
+    reported honestly instead of being retried in a loop.
     """
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     try:
-        rows = http_json(url, timeout=timeout)
+        req = urllib.request.Request(url, headers={
+            **HEADERS,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8", errors="replace")
+        rows = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        msg = f"HTTP {exc.code}"
+        if exc.code == 429:
+            msg = "HTTP 429 (тимчасовий ліміт запитів до безкоштовного фіду)"
+        return [], FeedStatus("Economic calendar", False, 0, msg)
     except Exception as exc:  # noqa: BLE001
         return [], FeedStatus("Economic calendar", False, 0, str(exc))
 

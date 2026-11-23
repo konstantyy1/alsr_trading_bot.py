@@ -319,6 +319,72 @@ def test_pair_label() -> tuple[bool, str]:
     return not bad, "ticker rendered as pair" if not bad else f"wrong: {bad}"
 
 
+def test_events_roundtrip_with_offset() -> tuple[bool, str]:
+    """Calendar rows must survive a store round-trip when they carry a UTC offset.
+
+    SQLite keeps timestamps as text, so a naive string range comparison silently
+    dropped every row once the feed sent "03:15:00-05:00". That made the calendar
+    look empty and blocked all entries, so the filter is checked explicitly.
+    """
+    from store import Store
+
+    path = os.path.join(tempfile.mkdtemp(), "events.db")
+    store = Store("")
+    store._sqlite_path = path
+    store._ready = False
+    now = datetime.now(UTC)
+    rows = []
+    for i, offset_hours in enumerate((-5, 0, 2)):
+        tz = timezone(timedelta(hours=offset_hours))
+        rows.append({
+            "id": f"cal:{i}", "title": f"Event {i}", "currency": "USD", "impact": "high",
+            "time_utc": (now + timedelta(hours=i + 1)).astimezone(tz),
+            "source": "Economic calendar (free weekly feed)", "url": None,
+            "actual": "1.2" if i == 0 else None, "forecast": f"{i}.0", "previous": "0.5",
+        })
+    store.save_events(rows)
+    found = store.list_events(now - timedelta(days=1), now + timedelta(days=7))
+
+    rows[0]["forecast"] = "9.9"
+    store.save_events(rows)
+    updated = [r for r in store.list_events(now - timedelta(days=1), now + timedelta(days=7)) if r["id"] == "cal:0"]
+
+    ok = (
+        len(found) == 3
+        and [r["id"] for r in found] == ["cal:0", "cal:1", "cal:2"]
+        and found[0]["forecast"] == "0.0"
+        and found[0]["actual"] == "1.2"
+        and len(store.list_events(now + timedelta(days=30), now + timedelta(days=40))) == 0
+        and updated and updated[0]["forecast"] == "9.9"
+    )
+    return ok, f"{len(found)}/3 rows kept with offsets, values stored, no duplicates"
+
+
+def test_calendar_usable_gate() -> tuple[bool, str]:
+    """Silent feed vs. genuinely empty week must be told apart."""
+    from scan import calendar_usable
+
+    stored = [{"source": "Economic calendar (free weekly feed)", "title": "CPI"}]
+    cases = {
+        "fetch ok, no rows": calendar_usable(True, [], True),
+        "fetch failed, cache exists": calendar_usable(False, stored, True),
+        "fetch failed, no cache": calendar_usable(False, [], True),
+        "fetch crashed, no cache": calendar_usable(None, [], True),
+        "news disabled": calendar_usable(None, [], False),
+        "cache reused": calendar_usable(True, stored, True),
+    }
+    expected = {
+        "fetch ok, no rows": True,
+        "fetch failed, cache exists": True,
+        "fetch failed, no cache": False,
+        "fetch crashed, no cache": False,
+        "news disabled": True,
+        "cache reused": True,
+    }
+    bad = {k: v for k, v in cases.items() if v != expected[k]}
+    return not bad, f"6 cases as expected" if not bad else f"wrong: {bad}"
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -336,6 +402,8 @@ TESTS = [
     ("Session windows", test_session_windows),
     ("News blackout gate", test_news_blackout),
     ("News feed down blocks entries", test_news_feed_down_blocks),
+    ("Calendar events survive storage", test_events_roundtrip_with_offset),
+    ("Calendar usable gate", test_calendar_usable_gate),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

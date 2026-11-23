@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS events (
   time_utc TIMESTAMPTZ NOT NULL,
   source TEXT NOT NULL,
   url TEXT,
+  actual TEXT,
+  forecast TEXT,
+  previous TEXT,
   fetched_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_time ON events (time_utc);
@@ -79,7 +82,7 @@ CREATE TABLE IF NOT EXISTS signals (id TEXT PRIMARY KEY, symbol TEXT, side TEXT,
   score INTEGER, setup TEXT, created_at TEXT, updated_at TEXT, origin TEXT, payload TEXT);
 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals (created_at DESC);
 CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, title TEXT, currency TEXT, impact TEXT,
-  time_utc TEXT, source TEXT, url TEXT, fetched_at TEXT);
+  time_utc TEXT, source TEXT, url TEXT, actual TEXT, forecast TEXT, previous TEXT, fetched_at TEXT);
 CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, verdict TEXT, session TEXT, details TEXT);
 CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, level TEXT, scope TEXT, message TEXT);
 CREATE TABLE IF NOT EXISTS messages (key TEXT PRIMARY KEY, sent_at TEXT, kind TEXT, signal_id TEXT);
@@ -127,6 +130,16 @@ class Store:
                 for stmt in (SCHEMA_PG if self.backend == "postgres" else SCHEMA_SQLITE).split(";"):
                     if stmt.strip():
                         cur.execute(stmt)
+                # Older databases were created without the real calendar values.
+                # Add the columns in place so an existing deployment keeps its data.
+                for col in ("actual", "forecast", "previous"):
+                    try:
+                        if self.backend == "postgres":
+                            cur.execute(f"ALTER TABLE events ADD COLUMN IF NOT EXISTS {col} TEXT")
+                        else:
+                            cur.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+                    except Exception:  # noqa: BLE001 - column already exists
+                        pass
             self._ready = True
 
     @staticmethod
@@ -188,15 +201,21 @@ class Store:
             for e in events:
                 if self.backend == "postgres":
                     cur.execute(
-                        """INSERT INTO events (id,title,currency,impact,time_utc,source,url,fetched_at)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET fetched_at=EXCLUDED.fetched_at""",
-                        (e["id"], e["title"], e["currency"], e["impact"], e["time_utc"], e["source"], e.get("url"), self._now()),
+                        """INSERT INTO events (id,title,currency,impact,time_utc,source,url,actual,forecast,previous,fetched_at)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT (id) DO UPDATE SET actual=EXCLUDED.actual, forecast=EXCLUDED.forecast,
+                             previous=EXCLUDED.previous, fetched_at=EXCLUDED.fetched_at""",
+                        (e["id"], e["title"], e["currency"], e["impact"], e["time_utc"], e["source"], e.get("url"),
+                         e.get("actual"), e.get("forecast"), e.get("previous"), self._now()),
                     )
                 else:
                     cur.execute(
-                        """INSERT INTO events (id,title,currency,impact,time_utc,source,url,fetched_at)
-                           VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at""",
-                        (e["id"], e["title"], e["currency"], e["impact"], e["time_utc"], e["source"], e.get("url"), self._now().isoformat()),
+                        """INSERT INTO events (id,title,currency,impact,time_utc,source,url,actual,forecast,previous,fetched_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(id) DO UPDATE SET actual=excluded.actual, forecast=excluded.forecast,
+                             previous=excluded.previous, fetched_at=excluded.fetched_at""",
+                        (e["id"], e["title"], e["currency"], e["impact"], e["time_utc"], e["source"], e.get("url"),
+                         e.get("actual"), e.get("forecast"), e.get("previous"), self._now().isoformat()),
                     )
 
     def list_events(self, start: datetime, end: datetime) -> list[dict]:
@@ -205,17 +224,26 @@ class Store:
             cur = conn.cursor()
             if self.backend == "postgres":
                 cur.execute("SELECT * FROM events WHERE time_utc >= %s AND time_utc <= %s ORDER BY time_utc LIMIT 300", (start, end))
+                rows = cur.fetchall()
             else:
-                cur.execute("SELECT * FROM events WHERE time_utc >= ? AND time_utc <= ? ORDER BY time_utc LIMIT 300", (start.isoformat(), end.isoformat()))
-            rows = cur.fetchall()
+                # SQLite stores timestamps as text, so a string comparison breaks as
+                # soon as one row carries an offset ("03:15:00-05:00"). Compare real
+                # datetimes in Python instead; the table only holds a few hundred rows.
+                cur.execute("SELECT * FROM events ORDER BY time_utc DESC LIMIT 800")
+                rows = cur.fetchall()
         out = []
         for r in rows:
             d = dict(r)
             t = d["time_utc"]
-            d["time_utc"] = t if isinstance(t, datetime) else datetime.fromisoformat(t)
+            try:
+                d["time_utc"] = t if isinstance(t, datetime) else datetime.fromisoformat(str(t))
+            except (ValueError, TypeError):
+                continue
             if d["time_utc"].tzinfo is None:
                 d["time_utc"] = d["time_utc"].replace(tzinfo=timezone.utc)
-            out.append(d)
+            if start <= d["time_utc"] <= end:
+                out.append(d)
+        out.sort(key=lambda e: e["time_utc"])
         return out
 
     # ---------- decisions & logs ----------
