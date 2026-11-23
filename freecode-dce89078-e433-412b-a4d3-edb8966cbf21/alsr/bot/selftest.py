@@ -446,6 +446,34 @@ def test_chat_binding() -> tuple[bool, str]:
     return ok, f"bind {after_bind!r} survives restart, cleared to {after_clear!r}"
 
 
+def test_calendar_xml_fallback() -> tuple[bool, str]:
+    """The XML mirror must parse identically when the JSON path is throttled.
+
+    Both formats describe the same week; XML times are UTC in `MM-DD-YYYY` +
+    `h:mmam/pm` form, which has to be converted without guessing a timezone.
+    """
+    from datetime import datetime
+    import newsfeed
+
+    ok_parse, note_parse = newsfeed._parse_xml_time("11-24-2026", "1:30pm") == datetime(
+        2026, 11, 24, 13, 30, tzinfo=UTC
+    ), "1:30pm -> 13:30 UTC"
+    midnight, _ = newsfeed._parse_xml_time("11-24-2026", "12:00am"), "x"
+    noon, _ = newsfeed._parse_xml_time("11-24-2026", "12:00pm"), "x"
+
+    row = newsfeed._cal_row("Core CPI m/m", "USD", midnight, "High", "", "0.3%", "0.2%")
+    ok_row = (
+        row is not None
+        and row["impact"] == "high"
+        and row["forecast"] == "0.3%"
+        and row["actual"] is None
+        and row["id"].startswith("cal:USD:")
+    )
+    ok = ok_parse and midnight.hour == 0 and noon.hour == 12 and bool(ok_row)
+    note = f"{note_parse}, 12:00am -> {midnight.hour}h, 12:00pm -> {noon.hour}h, row ok={bool(ok_row)}"
+    return ok, note
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -467,6 +495,7 @@ TESTS = [
     ("Calendar usable gate", test_calendar_usable_gate),
     ("Entry price geometry", test_entry_price_geometry),
     ("Telegram chat binding", test_chat_binding),
+    ("Calendar XML fallback", test_calendar_xml_fallback),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

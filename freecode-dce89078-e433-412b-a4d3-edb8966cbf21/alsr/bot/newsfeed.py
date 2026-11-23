@@ -115,62 +115,129 @@ def _parse_date(raw: str) -> datetime | None:
         return None
 
 
-def fetch_calendar(timeout: int = 15) -> tuple[list[dict], FeedStatus]:
-    """Free weekly economic calendar with real actual/forecast/previous values.
+CAL_JSON = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+CAL_XML = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
+BROWSER_HEADERS = {
+    **HEADERS,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-    Only EUR and USD rows are kept. Empty strings stay empty — never coerced to 0.
-    The host rate-limits aggressively, so callers must cache the result; a 429 is
-    reported honestly instead of being retried in a loop.
-    """
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    try:
-        req = urllib.request.Request(url, headers={
-            **HEADERS,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            raw = res.read().decode("utf-8", errors="replace")
-        rows = json.loads(raw)
-    except urllib.error.HTTPError as exc:
-        msg = f"HTTP {exc.code}"
-        if exc.code == 429:
-            msg = "HTTP 429 (тимчасовий ліміт запитів до безкоштовного фіду)"
-        return [], FeedStatus("Economic calendar", False, 0, msg)
-    except Exception as exc:  # noqa: BLE001
-        return [], FeedStatus("Economic calendar", False, 0, str(exc))
 
+def _cal_row(title: str, country: str, ts: datetime, impact_raw: str,
+             actual, forecast, previous, url=None) -> dict | None:
+    title = (title or "").strip()
+    if not title or ts is None:
+        return None
+    impact_raw = (impact_raw or "").lower()
+    impact = "high" if impact_raw == "high" else "medium" if impact_raw == "medium" else "low"
+    return {
+        "id": f"cal:{country}:{int(ts.timestamp())}:{re.sub(r'[^a-z0-9]+', '-', title.lower())[:40]}",
+        "title": title,
+        "currency": country,
+        "impact": impact,
+        "time_utc": ts,
+        "source": "Economic calendar (free weekly feed)",
+        "url": url,
+        "actual": (actual or "").strip() or None,
+        "forecast": (forecast or "").strip() or None,
+        "previous": (previous or "").strip() or None,
+    }
+
+
+def _fetch_calendar_json(timeout: int) -> tuple[list[dict], str | None]:
+    req = urllib.request.Request(CAL_JSON, headers={**BROWSER_HEADERS, "Accept": "application/json, text/plain, */*"})
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        rows = json.loads(res.read().decode("utf-8", errors="replace"))
     if not isinstance(rows, list):
-        return [], FeedStatus("Economic calendar", False, 0, "некоректний формат")
-
-    out: list[dict] = []
+        raise ValueError("некоректний формат JSON")
+    out = []
     for r in rows:
         country = str(r.get("country", "")).upper()
         if country not in ("EUR", "USD"):
             continue
         raw_date = r.get("date")
-        ts = _parse_date(str(raw_date)) if raw_date else None
-        if ts is None:
+        if not raw_date:
             continue
-        title = str(r.get("title", "")).strip()
-        if not title:
+        row = _cal_row(r.get("title", ""), country, _parse_date(str(raw_date)), r.get("impact", ""),
+                       r.get("actual"), r.get("forecast"), r.get("previous"))
+        if row:
+            out.append(row)
+    return out, None
+
+
+def _fetch_calendar_xml(timeout: int) -> tuple[list[dict], str | None]:
+    """Same weekly feed in XML. The host throttles the JSON path harder, and the
+    XML file carries identical events, so this is the fallback that keeps the
+    news gate working instead of blocking every entry for days."""
+    req = urllib.request.Request(CAL_XML, headers={**BROWSER_HEADERS, "Accept": "application/xml, text/xml, */*"})
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        raw = res.read()
+    text = raw.decode("windows-1252", errors="replace")
+    root = ET.fromstring(text)
+    out = []
+    for ev in root.findall("event"):
+        country = (ev.findtext("country") or "").strip().upper()
+        if country not in ("EUR", "USD"):
             continue
-        impact_raw = str(r.get("impact", "")).lower()
-        impact = "high" if impact_raw == "high" else "medium" if impact_raw == "medium" else "low"
-        out.append({
-            "id": f"cal:{country}:{int(ts.timestamp())}:{re.sub(r'[^a-z0-9]+', '-', title.lower())[:40]}",
-            "title": title,
-            "currency": country,
-            "impact": impact,
-            "time_utc": ts,
-            "source": "Economic calendar (free weekly feed)",
-            "url": None,
-            "actual": (r.get("actual") or "").strip() or None,
-            "forecast": (r.get("forecast") or "").strip() or None,
-            "previous": (r.get("previous") or "").strip() or None,
-        })
-    return out, FeedStatus("Economic calendar", True, len(out))
+        ts = _parse_xml_time(ev.findtext("date") or "", ev.findtext("time") or "")
+        row = _cal_row(ev.findtext("title") or "", country, ts, ev.findtext("impact") or "",
+                       ev.findtext("actual"), ev.findtext("forecast"), ev.findtext("previous"),
+                       (ev.findtext("url") or "").strip() or None)
+        if row:
+            out.append(row)
+    return out, None
+
+
+def _parse_xml_time(date_s: str, time_s: str) -> datetime | None:
+    """XML dates look like `11-22-2026` + `9:45pm`, both in UTC (verified against
+    the JSON feed for every EUR/USD row of the same week)."""
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})", date_s.strip())
+    if not m:
+        return None
+    month, day, year = (int(g) for g in m.groups())
+    tm = re.match(r"(\d{1,2}):(\d{2})\s*([ap])m", time_s.strip(), re.IGNORECASE)
+    if not tm:
+        return None
+    hour, minute, half = int(tm.group(1)), int(tm.group(2)), tm.group(3).lower()
+    if half == "p" and hour != 12:
+        hour += 12
+    elif half == "a" and hour == 12:
+        hour = 0
+    try:
+        return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def fetch_calendar(timeout: int = 15) -> tuple[list[dict], FeedStatus]:
+    """Free weekly economic calendar with real actual/forecast/previous values.
+
+    Only EUR and USD rows are kept. Empty strings stay empty — never coerced to 0.
+    The host rate-limits by IP and blocks whole ranges, so callers must cache the
+    result; a 429 is reported honestly instead of being retried in a loop. JSON is
+    tried first, then the identical XML feed, which survives throttling longer.
+    """
+    problems: list[str] = []
+    for fetcher in (_fetch_calendar_json, _fetch_calendar_xml):
+        try:
+            events, _ = fetcher(timeout)
+            return events, FeedStatus("Economic calendar", True, len(events))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                problems.append("HTTP 429 (тимчасовий ліміт запитів до безкоштовного фіду)")
+            else:
+                problems.append(f"HTTP {exc.code}")
+        except ET.ParseError:
+            problems.append("некоректний XML")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(str(exc)[:80])
+
+    detail = problems[0] if problems else "невідома помилка"
+    if len(problems) > 1:
+        detail += " (обидва формати фіду недоступні)"
+    return [], FeedStatus("Economic calendar", False, 0, detail)
 
 
 def fetch_news(timeout: int = 12) -> tuple[list[dict], list[FeedStatus]]:
