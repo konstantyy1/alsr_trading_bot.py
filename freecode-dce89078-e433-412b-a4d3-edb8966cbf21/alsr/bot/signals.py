@@ -323,8 +323,34 @@ def detect_setups(snap: Snapshot, frames: dict[str, Frame], levels: list[Zone], 
 
     # Reject structurally valid but economically meaningless setups. Measured from
     # the price the order actually fills at, not from the trigger price.
-    out = [c for c in out if min_risk_pips <= pips(entry_price(c.side, c.entry_low, c.entry_high), c.stop) <= max_risk_pips]
-    return out
+    # The reward is checked here too: on a limit entry the fill sits at one edge of the
+    # zone while the target was computed from the current mid, so a passing trigger
+    # price can still leave almost no room to the target. Two trades in the 59-day
+    # sample reached TP1 within 0.3 and 3.0 pips of the fill while the filter thought
+    # they were 1:2 — this check removes that whole class.
+    kept: list[Candidate] = []
+    for c in out:
+        if _targets_are_far_enough(c, min_risk_pips, max_risk_pips):
+            kept.append(c)
+    return kept
+
+
+def _targets_are_far_enough(c: Candidate, min_risk_pips: float, max_risk_pips: float) -> bool:
+    """Is there real room between the fill, the stop and the first target?
+
+    A limit entry fills at one edge of the zone, while the targets were computed from
+    the current mid. A setup can therefore look like 1:2 on the trigger price and still
+    leave almost nothing to TP1 once filled. Two trades in the 59-day sample did exactly
+    that (0.3 and 3.0 pips of room), so the check is made from the fill price only.
+    """
+    fill = entry_price(c.side, c.entry_low, c.entry_high)
+    risk = pips(fill, c.stop)
+    reward = pips(fill, c.tp1)
+    if not (min_risk_pips <= risk <= max_risk_pips):
+        return False
+    if risk <= 0 or reward < risk:
+        return False
+    return True
 
 
 def score_candidate(c: Candidate, frames: dict[str, Frame], snap: Snapshot, session: SessionInfo, news: NewsRisk, cfg) -> list[dict]:

@@ -412,6 +412,39 @@ def test_store_dedupe() -> tuple[bool, str]:
     return ok, "claim/dedupe/release/state round-trip"
 
 
+def test_target_must_be_far_from_fill() -> tuple[bool, str]:
+    """A target closer than the stop must never become a signal.
+
+    Found in the 59-day journal: two trades had TP1 within 0.3 and 3.0 pips of the
+    fill while the filter believed they were 1:2, because the reward was measured from
+    the current mid rather than from the limit fill price. The check now runs on the
+    fill price, and this test calls that function directly.
+    """
+    from config import PIP
+    from signals import Candidate, _targets_are_far_enough
+
+    def make(entry_low: float, entry_high: float, stop: float, tp1: float):
+        return Candidate(
+            side="SELL", setup="BREAKOUT_RETEST", entry_low=entry_low, entry_high=entry_high,
+            trigger=entry_low, stop=stop, tp1=tp1, tp2=tp1 - 0.0030, tp3=None, rr=2.0,
+            risk_pips=6.0, reward_pips=12.0, expected_hold_min=60, max_hold_min=240,
+            context={}, why=[], cancel_rules=[], invalidations=[],
+        )
+
+    # A SELL fills at entry_low = 1.09900. Target 1.09905 is only 0.5 pips away while
+    # the stop is 6 pips: the trade cannot pay even 1R of genuine room.
+    broken = make(1.09900, 1.10000, 1.09960, 1.09905)
+    good = make(1.09900, 1.10000, 1.09960, 1.09500)
+
+    reject = _targets_are_far_enough(broken, 5.0, 35.0) is False
+    accept = _targets_are_far_enough(good, 5.0, 35.0) is True
+
+    broken_pips = abs(1.09900 - 1.09905) / PIP
+    ok = reject and accept
+    return ok, (f"ціль 0.5 pips відхилена={reject} (реально {broken_pips:.1f} pips), "
+                f"нормальна прийнята={accept}")
+
+
 def test_counter_trend_is_refused() -> tuple[bool, str]:
     """Setups against the H4 trend must not become signals.
 
@@ -929,6 +962,7 @@ TESTS = [
     ("Score is not a win rate", test_score_is_not_winrate),
     ("Backtest thresholds hold", test_backtest_thresholds_hold),
     ("Counter-trend is refused", test_counter_trend_is_refused),
+    ("Target must be far from fill", test_target_must_be_far_from_fill),
     ("Break-even is applied", test_break_even_turns_loss_into_scratch),
     ("Ticker rendered as pair", test_pair_label),
 ]
