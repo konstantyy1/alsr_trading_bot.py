@@ -109,7 +109,21 @@ class Store:
             import psycopg
             from psycopg.rows import dict_row
 
-            with psycopg.connect(self.url, row_factory=dict_row) as conn:
+            # Two production details learned the hard way with hosted Postgres:
+            #  * A serverless provider (Neon) hibernates an idle database, and the
+            #    first connection after that can take several seconds. Without a
+            #    connect timeout the request hangs until gunicorn's 120s limit.
+            #  * The same provider accepts "require" sslmode but returns a channel
+            #    binding that plain libpq rejects. psycopg needs sslmode=require only,
+            #    which the URL already carries, so nothing is overridden here.
+            # prepare_threshold=0 is required by Neon's pooled endpoint. It runs
+            # PgBouncer in transaction mode, which hands each statement to a different
+            # backend and cannot keep prepared statements. psycopg caches them after
+            # five executions by default, so without this the bot would work for a few
+            # minutes and then fail every write with "prepared statement does not
+            # exist". Disabling the cache costs a parse per query and prevents that.
+            with psycopg.connect(self.url, row_factory=dict_row, connect_timeout=15,
+                                 prepare_threshold=0) as conn:
                 yield conn
                 conn.commit()
         else:
@@ -324,6 +338,25 @@ class Store:
         with self._conn() as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM messages WHERE key = %s" if self.backend == "postgres" else "DELETE FROM messages WHERE key = ?", (key,))
+
+    # ---------- health ----------
+    def probe(self) -> tuple[bool, str]:
+        """Is the configured database actually reachable right now?
+
+        Reporting "persistent: true" from the URL alone would tell the owner his
+        history is safe while a wrong password or an expired free instance is
+        silently losing every trade. So the claim is made only after a real query
+        succeeds, and the failure reason is returned for the dashboard.
+        """
+        try:
+            self.init()
+            with self._conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT 1 AS ok")
+                cur.fetchone()
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - any failure means not usable
+            return False, f"{type(exc).__name__}: {exc}"[:300]
 
     # ---------- settings ----------
     def get_setting(self, key: str, default):

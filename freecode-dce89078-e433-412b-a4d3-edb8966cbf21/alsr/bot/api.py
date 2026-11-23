@@ -15,7 +15,7 @@ from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 _started_at = datetime.now(timezone.utc)
 
 # A snapshot costs 4-5 upstream requests, so cache it briefly for the dashboard.
@@ -64,6 +64,7 @@ def _now_iso() -> str:
 def status_payload(store: Store) -> dict:
     state = store.state()
     logs = store.list_logs(8)
+    db_ok, db_err = store.probe()
     last_run = state.get("last_run_at")
     stale = True
     if last_run:
@@ -81,7 +82,11 @@ def status_payload(store: Store) -> dict:
         "data": {
             "provider": "Yahoo Finance (free) · spread припущений",
             "database": store.backend,
-            "database_persistent": store.backend == "postgres",
+            # Only claimed after a real query succeeds. A configured but unreachable
+            # database must never read as "your history is safe".
+            "database_persistent": (store.backend == "postgres") and db_ok,
+            "database_ok": db_ok,
+            "database_error": db_err or None,
             "scan_interval_min": ENV.poll_interval_min,
         },
         "telegram": {
