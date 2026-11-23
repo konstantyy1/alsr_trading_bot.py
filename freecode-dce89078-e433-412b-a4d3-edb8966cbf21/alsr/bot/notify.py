@@ -269,6 +269,7 @@ def format_signal(sig: dict) -> str:
         f"└ TP3: <b>{tp3}</b>",
         "",
         f"<b>Ризик/прибуток 1:{sig['rr']}</b> · тримати {sig['expected_hold_min']}–{sig['max_hold_min']} хв",
+        f"План виходу: TP1 — закрити всю позицію. Коли прибуток дійде 0.75R, стоп на вхід (беззбиток).",
         f"Позиція {pos.get('lots', 0)} lot · ризик {pos.get('risk_amount', 0)} USD",
         "",
         "<b>Чому</b> <i>(score — відповідність правилам, не ймовірність)</i>",

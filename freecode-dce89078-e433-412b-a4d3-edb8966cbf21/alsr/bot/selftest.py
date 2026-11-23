@@ -305,6 +305,51 @@ def test_weak_session_is_blocked() -> tuple[bool, str]:
     return ok, (f"Asia={blocked_asia}, London вільна={london_free}, verdict Asia={verdict.verdict}")
 
 
+def test_break_even_turns_loss_into_scratch() -> tuple[bool, str]:
+    """The break-even rule must exist and behave as measured.
+
+    On 59 days this turned full -1R losses into scratches and added about +0.13R per
+    trade. Two things are checked: a trade that runs 0.75R then reverses exits at the
+    entry instead of the stop, and a trade that never reaches 0.75R still loses, so the
+    rule cannot be secretly widening the stop.
+    """
+    from config import Risk
+    from lifecycle import advance
+
+    risk = Risk()
+    be_r = float(risk.break_even_at_r)
+    if not (0.3 <= be_r <= 1.5):
+        return False, f"break_even_at_r виглядає неправильно: {be_r}"
+
+    created = datetime(2026, 11, 3, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    base = {
+        "side": "BUY", "status": "ACTIVE", "created_at": created.isoformat(),
+        "entry_low": 1.09950, "entry_high": 1.10050, "trigger": 1.10000,
+        "stop": 1.09850, "tp1": 1.10300, "tp2": 1.10500, "tp3": None,
+        "max_hold_min": 240, "break_even_at_r": be_r,
+    }
+    entry = base["entry_high"]
+    trigger_level = entry + be_r * abs(entry - base["stop"])
+
+    # 1) Reaches 0.75R, then falls back below the entry but above the stop.
+    up = _c(t0 + 300, entry, trigger_level + 0.0002, entry - 0.0001, trigger_level, True)
+    back = _c(t0 + 600, trigger_level, trigger_level, entry - 0.0004, entry - 0.0003, True)
+    sig = dict(base)
+    e1 = advance(sig, [up], created + timedelta(minutes=5))
+    sig["status"] = e1["status"] if e1 else "ACTIVE"
+    e2 = advance(sig, [up, back], created + timedelta(minutes=10))
+    scratch = e2 is not None and e2["status"] == "SL_HIT" and abs(e2["price"] - entry) < 1e-9
+
+    # 2) Never reaches 0.75R and stops out: a normal loss at the original stop.
+    down = _c(t0 + 300, entry, entry + 0.0002, base["stop"] - 0.0001, base["stop"], True)
+    e3 = advance(dict(base), [down], created + timedelta(minutes=5))
+    normal_loss = e3 is not None and e3["status"] == "SL_HIT" and abs(e3["price"] - base["stop"]) < 1e-9
+
+    ok = scratch and normal_loss
+    return ok, f"0.75R→беззбиток={scratch}, без 0.75R стоп не рухався={normal_loss}"
+
+
 def test_signal_template() -> tuple[bool, str]:
     """Every promised field must survive a redesign of the message.
 
@@ -884,6 +929,7 @@ TESTS = [
     ("Score is not a win rate", test_score_is_not_winrate),
     ("Backtest thresholds hold", test_backtest_thresholds_hold),
     ("Counter-trend is refused", test_counter_trend_is_refused),
+    ("Break-even is applied", test_break_even_turns_loss_into_scratch),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

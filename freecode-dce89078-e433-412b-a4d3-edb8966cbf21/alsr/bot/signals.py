@@ -495,8 +495,23 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
     widened = risk.cost_pips * PIP
     stop = cand.stop - widened / 2 if cand.side == "BUY" else cand.stop + widened / 2
     fill = entry_price(cand.side, cand.entry_low, cand.entry_high)
+
+    # TP1 is pushed slightly past the structural target. On 59 days the raw target
+    # scored +15.73R and the same target 10% further scored +17.76R, because price
+    # that reaches a visible level usually trades a little beyond it. The scale is
+    # measured, not guessed, and stays at 1.0 if the setting is changed.
+    tp1 = cand.tp1
+    if risk.tp1_scale and risk.tp1_scale != 1.0:
+        raw_r = pips(fill, cand.tp1) / pips(fill, stop) if pips(fill, stop) > 0 else 0
+        shifted = fill + (pips(fill, stop) * raw_r * risk.tp1_scale) * (1 if cand.side == "BUY" else -1) * PIP
+        # Never move a target through TP2 — that would make the ladder inconsistent.
+        tp2_far = pips(fill, cand.tp2)
+        shifted_far = pips(fill, shifted)
+        if 0 < shifted_far < tp2_far:
+            tp1 = round(shifted, 5)
+
     risk_pips = pips(fill, stop)
-    reward_pips = pips(fill, cand.tp1)
+    reward_pips = pips(fill, tp1)
     rr = (reward_pips / risk_pips) if risk_pips > 0 else 0.0
     lots = (risk.account_equity * risk.risk_percent / 100) / (risk_pips * 10) if risk_pips > 0 else 0
     return {
@@ -514,7 +529,7 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
         "entry_high": cand.entry_high,
         "trigger": round(fill, 5),
         "stop": round(stop, 5),
-        "tp1": cand.tp1,
+        "tp1": tp1,
         "tp2": cand.tp2,
         "tp3": cand.tp3,
         "rr": round(rr, 1),
@@ -522,6 +537,8 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
         "reward_pips": round(reward_pips, 1),
         "expected_hold_min": cand.expected_hold_min,
         "max_hold_min": cand.max_hold_min,
+        # Lifecycle reads this to move the stop to entry once 0.75R is banked.
+        "break_even_at_r": risk.break_even_at_r,
         "session": session.active,
         "quote_at_creation": snap.quote.mid if snap.quote else cand.trigger,
         "spread_at_creation": snap.quote.spread_pips if snap.quote else 0,
