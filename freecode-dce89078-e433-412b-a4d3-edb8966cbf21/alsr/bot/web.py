@@ -337,6 +337,17 @@ def route_market(environ, start_response):
         return _json(environ, start_response, 503, {"error": f"Дані недоступні: {exc}"})
 
 
+def route_chart(environ, start_response):
+    query = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
+    tf = (query.get("tf") or ["M15"])[0]
+    bars = (query.get("bars") or ["180"])[0]
+    try:
+        return _json(environ, start_response, 200, api.chart_payload(_STORE, tf, int(bars)))
+    except Exception as exc:  # noqa: BLE001
+        _STORE.log("error", "api", f"chart: {exc}")
+        return _json(environ, start_response, 503, {"error": f"Графік недоступний: {exc}"})
+
+
 def route_signals(environ, start_response):
     return _json(environ, start_response, 200, api.signals_payload(_STORE))
 
@@ -480,6 +491,7 @@ GET_ROUTES = {
     "/health": route_health,
     "/api/status": route_status,
     "/api/market": route_market,
+    "/api/chart": route_chart,
     "/api/signals": route_signals,
     "/api/stats": route_stats,
     "/api/calendar": route_calendar,

@@ -180,6 +180,32 @@
     header { padding-top: 18px; }
     .clock { text-align: left; }
   }
+  /* ---------- chart: the investigation map ---------- */
+  .chart-hero { padding: 18px 0 8px; border-bottom: 1px solid var(--rule); }
+  .chart-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .chart-bar h2 { font-family: var(--serif); font-weight: 500; font-size: 19px; margin: 0; }
+  .chart-sub { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  .tf-switch { display: inline-flex; border: 1px solid var(--rule); }
+  .tf-switch button {
+    appearance: none; background: transparent; color: var(--muted); border: 0;
+    border-right: 1px solid var(--rule); font-family: var(--mono); font-size: 11.5px;
+    padding: 5px 11px; cursor: pointer;
+  }
+  .tf-switch button:last-child { border-right: 0; }
+  .tf-switch button.on { background: var(--panel-2); color: var(--text); }
+  .tf-switch button:focus-visible { outline: 1px solid var(--jade); outline-offset: -3px; }
+  .chart-readout { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 10px 0 2px; min-height: 17px; }
+  .chart-readout b { color: var(--text); font-weight: 500; }
+  .chart-readout em { color: var(--amber); font-style: normal; }
+  .chart-box { margin-top: 2px; }
+  #chart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+  .legend i { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; }
+  .explain { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 12px 24px; margin: 16px 0 4px; }
+  .explain .ex { border-left: 1px solid var(--rule); padding-left: 11px; }
+  .explain .ex .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em; color: var(--dim); }
+  .explain .ex .v { font-size: 13px; color: var(--text); margin-top: 3px; }
+
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
   :focus-visible { outline: 2px solid var(--jade); outline-offset: 2px; }
 </style>
@@ -197,6 +223,31 @@
       <div style="margin-top:8px"><button id="btnScan" type="button">Запустити скан</button></div>
     </div>
   </header>
+
+  <div class="chart-hero">
+    <div class="chart-bar">
+      <div>
+        <h2>Карта руху</h2>
+        <div class="chart-sub" id="chartSub">свічки · зони · рівні · позначки сигналів</div>
+      </div>
+      <div class="tf-switch" id="tfSwitch" role="group" aria-label="Таймфрейм">
+        <button type="button" data-tf="M5">M5</button>
+        <button type="button" data-tf="M15" class="on">M15</button>
+        <button type="button" data-tf="H1">H1</button>
+        <button type="button" data-tf="H4">H4</button>
+      </div>
+    </div>
+    <div class="chart-readout" id="chartReadout">наведи на свічку — покажу, що вона робить</div>
+    <div class="chart-box" id="chart"><p class="empty">Завантаження графіка…</p></div>
+    <div class="legend">
+      <span><i style="background:var(--jade)"></i>EMA 20</span>
+      <span><i style="background:var(--amber)"></i>EMA 50</span>
+      <span><i style="background:rgba(111,185,155,.55);height:9px"></i>зона купівлі</span>
+      <span><i style="background:rgba(196,100,92,.55);height:9px"></i>зона продажу</span>
+      <span><i style="background:var(--dim);height:1px"></i>рівень дня / тижня</span>
+    </div>
+    <div class="explain" id="chartExplain"></div>
+  </div>
 
   <div class="grid">
     <!-- ============ left rail ============ -->
@@ -643,6 +694,191 @@
     }
   });
 
+  // ---------- the investigation map ----------
+  const CHART = { tf: "M15", data: null, hover: -1 };
+
+  const fmt = (v) => (v == null ? "—" : Number(v).toFixed(5));
+  const pipsBetween = (a, b) => (Math.abs(a - b) / 0.0001).toFixed(1);
+  const wawTime = (t) => new Date(t).toLocaleTimeString("pl-PL",
+    { timeZone: "Europe/Warsaw", hour: "2-digit", minute: "2-digit" });
+  const wawDay = (t) => new Date(t).toLocaleString("pl-PL",
+    { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit" });
+
+  // One candle explained in words, so a beginner learns from the chart instead of
+  // having to decode a green rectangle. The numbers are read straight off the bar.
+  function describeCandle(d, c, prev) {
+    const body = c.c - c.o;
+    const span = c.h - c.l;
+    const dir = body > 0 ? "бичача" : body < 0 ? "ведмежа" : "дожи";
+    const tail = span > 0 ? (Math.min(c.o, c.c) - c.l) / span : 0;
+    const head = span > 0 ? (c.h - Math.max(c.o, c.c)) / span : 0;
+    let shape = "";
+    if (tail > 0.55) shape = " · довгий нижній хвіст: покупці відбивали падіння";
+    else if (head > 0.55) shape = " · довгий верхній хвіст: продавці гасили ріст";
+    const move = prev ? ` · закриття ${body >= 0 ? "+" : "−"}${pipsBetween(c.c, prev.c)} pips від попередньої` : "";
+    return `${wawDay(c.t)} ${wawTime(c.t)} — ${dir}, тіло ${pipsBetween(c.c, c.o)} pips, весь хвіст ${pipsBetween(c.h, c.l)}${shape}${move}`;
+  }
+
+  function renderChart(payload) {
+    CHART.data = payload;
+    const host = $("chart");
+    const d = payload;
+    const bars = d.candles || [];
+    if (!bars.length) { host.innerHTML = '<p class="empty">Свічок немає — джерело даних недоступне.</p>'; return; }
+
+    const W = Math.max(560, host.clientWidth || 900);
+    const H = Math.round(W * 0.42);
+    const pad = { t: 16, r: 62, b: 24, l: 8 };
+    const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+
+    // Price window: candles plus every level and zone edge, so nothing is cut off.
+    const prices = [];
+    bars.forEach((c) => { prices.push(c.h, c.l); });
+    (d.levels || []).forEach((z) => prices.push(z.price));
+    (d.zones || []).forEach((z) => prices.push(z.low, z.high));
+    let lo = Math.min(...prices), hi = Math.max(...prices);
+    const padP = (hi - lo) * 0.06 || 0.0005;
+    lo -= padP; hi += padP;
+    const y = (p) => pad.t + ih - ((p - lo) / (hi - lo)) * ih;
+    const step = iw / bars.length;
+    const x = (i) => pad.l + step * (i + 0.5);
+    const bw = Math.max(1.2, Math.min(step * 0.66, 9));
+
+    const up = "var(--jade)", down = "var(--red)";
+    const out = [];
+    out.push(`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Графік EUR/USD ${d.tf}">`);
+
+    // grid + price axis on the right
+    const ticks = 6;
+    for (let i = 0; i <= ticks; i++) {
+      const p = lo + ((hi - lo) * i) / ticks;
+      const yy = y(p).toFixed(1);
+      out.push(`<line x1="${pad.l}" x2="${W - pad.r}" y1="${yy}" y2="${yy}" stroke="var(--rule-soft)" stroke-width="1"/>`);
+      out.push(`<text x="${W - pad.r + 6}" y="${yy}" fill="var(--dim)" font-family="monospace" font-size="9.5" dominant-baseline="middle">${p.toFixed(5)}</text>`);
+    }
+
+    // zones first: they sit behind the candles like shaded ground
+    (d.zones || []).forEach((z) => {
+      const buy = z.direction !== "bear";
+      const y1 = y(z.high), y2 = y(z.low);
+      out.push(`<rect x="${pad.l}" y="${Math.min(y1, y2).toFixed(1)}" width="${iw}" height="${Math.max(1.5, Math.abs(y2 - y1)).toFixed(1)}" fill="${buy ? "rgba(111,185,155,.13)" : "rgba(196,100,92,.13)"}"/>`);
+    });
+
+    // horizontal reference levels (PDH/PDL, week extremes)
+    (d.levels || []).forEach((z) => {
+      const yy = y(z.price).toFixed(1);
+      out.push(`<line x1="${pad.l}" x2="${W - pad.r}" y1="${yy}" y2="${yy}" stroke="var(--dim)" stroke-width="1" stroke-dasharray="5 4" opacity="0.75"/>`);
+      out.push(`<text x="${pad.l + 3}" y="${(y(z.price) - 4).toFixed(1)}" fill="var(--dim)" font-family="monospace" font-size="9">${esc(z.label || "")}</text>`);
+    });
+
+    // candles
+    bars.forEach((c, i) => {
+      const col = c.c >= c.o ? up : down;
+      const cx = x(i);
+      out.push(`<line x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${y(c.h).toFixed(1)}" y2="${y(c.l).toFixed(1)}" stroke="${col}" stroke-width="1" opacity="0.85"/>`);
+      const yo = y(c.o), yc = y(c.c);
+      const top = Math.min(yo, yc);
+      const hgt = Math.max(1, Math.abs(yc - yo));
+      out.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" fill="${col}" opacity="${c.complete ? 0.92 : 0.45}"/>`);
+    });
+
+    // EMA 20 as a gentle path over the closes (recomputed for this window only)
+    out.push(emaPath(bars, 20, x, y, up, W));
+    out.push(emaPath(bars, 50, x, y, "var(--amber)", W));
+
+    // signal marks: a small tick where the bot made a call, with its outcome colour
+    (d.signals || []).forEach((s) => {
+      const i = bars.findIndex((c) => c.t >= s.at);
+      if (i < 0) return;
+      const cx = x(i);
+      const atEntry = s.entry_low != null ? y(s.entry_low) : pad.t + 8;
+      const isBuy = s.side === "BUY";
+      const colour = s.r_result > 0 ? "var(--jade)" : s.r_result < 0 ? "var(--red)" : "var(--amber)";
+      out.push(`<line x1="${cx.toFixed(1)}" x2="${cx.toFixed(1)}" y1="${pad.t}" y2="${H - pad.b}" stroke="${colour}" stroke-width="1" opacity="0.35"/>`);
+      out.push(`<circle cx="${cx.toFixed(1)}" cy="${atEntry.toFixed(1)}" r="3.6" fill="none" stroke="${colour}" stroke-width="1.6"/>`);
+      out.push(`<text x="${(cx + 5).toFixed(1)}" y="${(pad.t + 9).toFixed(1)}" fill="${colour}" font-family="monospace" font-size="8.5">${isBuy ? "B" : "S"}${s.grade || ""}</text>`);
+    });
+
+    // hover layer: one wide invisible rect per bar
+    bars.forEach((c, i) => {
+      out.push(`<rect class="hitz" data-i="${i}" x="${(x(i) - step / 2).toFixed(1)}" y="${pad.t}" width="${step.toFixed(1)}" height="${ih}" fill="transparent"/>`);
+    });
+    // current price line
+    if (d.quote && d.quote.mid) {
+      const yy = y(d.quote.mid).toFixed(1);
+      out.push(`<line x1="${pad.l}" x2="${W - pad.r}" y1="${yy}" y2="${yy}" stroke="var(--text)" stroke-width="1" opacity="0.55"/>`);
+      out.push(`<rect x="${W - pad.r + 2}" y="${(y(d.quote.mid) - 7).toFixed(1)}" width="44" height="14" fill="var(--panel-2)"/>`);
+      out.push(`<text x="${W - pad.r + 5}" y="${(y(d.quote.mid) + 0.5).toFixed(1)}" fill="var(--text)" font-family="monospace" font-size="9.5" dominant-baseline="middle">${fmt(d.quote.mid)}</text>`);
+    }
+    out.push("</svg>");
+    host.innerHTML = out.join("");
+
+    host.querySelectorAll(".hitz").forEach((r) => {
+      r.addEventListener("mouseenter", () => showBar(+r.dataset.i));
+      r.addEventListener("touchstart", (e) => { showBar(+r.dataset.i); }, { passive: true });
+    });
+
+    $("chartSub").textContent = `${d.tf} · ${bars.length} свічок · оновлено ${wawTime(d.at)}`;
+    renderExplain(d);
+  }
+
+  function emaPath(bars, period, x, y, colour, W) {
+    const k = 2 / (period + 1);
+    let v = bars[0].c;
+    const pts = [];
+    bars.forEach((c, i) => { v = c.c * k + v * (1 - k); if (i > period * 0.4) pts.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`); });
+    if (!pts.length) return "";
+    return `<polyline points="${pts.join(" ")}" fill="none" stroke="${colour}" stroke-width="1.2" opacity="0.6"/>`;
+  }
+
+  function showBar(i) {
+    const d = CHART.data;
+    if (!d || !d.candles[i]) return;
+    const c = d.candles[i];
+    const prev = i > 0 ? d.candles[i - 1] : null;
+    const r = CHART.data.candles[i];
+    $("chartReadout").innerHTML =
+      `<b>${fmt(c.o)}</b> / <b>${fmt(c.h)}</b> / <b>${fmt(c.l)}</b> / <b>${fmt(c.c)}</b>` +
+      ` · діапазон ${pipsBetween(c.h, c.l)} pips · <em>${describeCandle(d, c, prev)}</em>`;
+  }
+
+  function renderExplain(d) {
+    const s = d.structure || {};
+    const nextZone = (d.zones || []).slice().sort((a, b) => a.low - b.low)[0];
+    const cards = [
+      { k: "Структура", v: `${d.tf}: <b>${s.value || "—"}</b>${s.bos ? ` · BOS ${s.bos}` : ""}${s.choch ? ` · CHoCH ${s.choch}` : ""}` },
+      { k: "Волатильність", v: `ATR ${s.atr_pips || "—"} pips · діапазон ${fmt(s.range_low)} – ${fmt(s.range_high)}` },
+      { k: "Імпульс", v: `RSI ${s.rsi ?? "—"} · EMA20 ${fmt(d.ema?.ema20)} · EMA50 ${fmt(d.ema?.ema50)}` },
+      { k: "Зони на карті", v: (d.zones || []).length ? (d.zones || []).slice(0, 3).map((z) => `${esc(z.label || z.kind)} ${fmt(z.low)}–${fmt(z.high)}`).join("<br>") : "вільних зон не знайдено" },
+    ];
+    $("chartExplain").innerHTML = cards.map((c) =>
+      `<div class="ex"><div class="k">${c.k}</div><div class="v">${c.v}</div></div>`).join("");
+  }
+
+  async function loadChart() {
+    try {
+      const payload = await getJSON(`/api/chart?tf=${CHART.tf}&bars=170`);
+      renderChart(payload);
+    } catch (err) {
+      $("chart").innerHTML = FAIL(err.message);
+    }
+  }
+
+  $("tfSwitch").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-tf]");
+    if (!b) return;
+    CHART.tf = b.dataset.tf;
+    document.querySelectorAll("#tfSwitch button").forEach((x) => x.classList.toggle("on", x === b));
+    $("chart").innerHTML = '<p class="empty">Завантаження…</p>';
+    loadChart();
+  });
+
+  let rt = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(rt);
+    rt = setTimeout(() => { if (CHART.data) renderChart(CHART.data); }, 180);
+  });
+
   async function refresh() {
     clock();
     try {
@@ -671,6 +907,7 @@
     if (cal.status === "fulfilled") renderCalendar(cal.value); else $("calendar").innerHTML = FAIL(cal.reason.message);
     if (dec.status === "fulfilled") { renderDecisions(dec.value); renderVerdict(dec.value); }
     if (st.status === "fulfilled") renderSelftest(st.value); else $("selftest").innerHTML = FAIL(st.reason.message);
+    loadChart();
   }
 
   refresh();

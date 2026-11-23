@@ -15,7 +15,7 @@ from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
-VERSION = "2.6.3"
+VERSION = "2.6.4"
 _started_at = datetime.now(timezone.utc)
 
 # A snapshot costs 4-5 upstream requests, so cache it briefly for the dashboard.
@@ -132,6 +132,101 @@ def _snapshot():
     frames = {tf: analyse(tf, snap.candles.get(tf, [])) for tf in ("M5", "M15", "H1", "H4")}
     _SNAP_CACHE.update({"at": datetime.now(timezone.utc), "snap": snap, "frames": frames})
     return snap, frames
+
+
+def _break_text(level) -> str | None:
+    """A BOS/CHoCH arrives as a dict; the dashboard needs one readable string.
+
+    Returning the dict made the page render "[object Object]", which hides the most
+    important thing on the chart: which way structure broke and at what price.
+    """
+    if not level:
+        return None
+    if isinstance(level, str):
+        return level
+    direction = level.get("dir") or level.get("direction") or ""
+    price = level.get("price") or level.get("level")
+    label = "вгору" if str(direction).lower() in ("bull", "up", "buy") else "вниз" if direction else ""
+    return f"{label} {float(price):.5f}".strip() if price else (label or None)
+
+
+def chart_payload(store: Store, tf: str = "M15", bars: int = 180) -> dict:
+    """Everything the investigation chart needs, from the same analysis as the bot.
+
+    The dashboard must not draw its own private picture of the market: if the chart
+    and the signal disagree, one of them is lying. So zones, swings and structure come
+    from `analyse()`, exactly the function `build_signal` reads, and the signals are
+    the stored ones, placed at their creation time.
+    """
+    tf = tf.upper()
+    if tf not in ("M5", "M15", "H1", "H4"):
+        tf = "M15"
+    snap, frames = _snapshot()
+    frame = frames.get(tf) or frames["M15"]
+    candles = snap.candles.get(tf, [])[-max(40, min(int(bars), 400)):]
+    quote = snap.quote
+
+    def candle(c) -> dict:
+        return {"t": int(c.t), "o": round(c.o, 5), "h": round(c.h, 5),
+                "l": round(c.l, 5), "c": round(c.c, 5), "complete": bool(c.complete)}
+
+    signals = store.list_signals(limit=30)
+    marks = []
+    for s in signals:
+        created = s.get("created_at")
+        try:
+            at = datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            continue
+        marks.append({
+            "id": s.get("id"),
+            "at": int(at),
+            "side": s.get("side"),
+            "status": s.get("status"),
+            "grade": s.get("grade"),
+            "entry_low": s.get("entry_low"),
+            "entry_high": s.get("entry_high"),
+            "stop": s.get("stop"),
+            "tp1": s.get("tp1"),
+            "r_result": s.get("r_result"),
+        })
+
+    return {
+        "tf": tf,
+        "at": utcnow().isoformat(),
+        "candles": [candle(c) for c in candles],
+        "levels": [
+            {"kind": z.kind, "price": round(z.low, 5), "label": z.label}
+            for z in levels_now(snap)
+        ],
+        "zones": [
+            {"kind": z.kind, "low": round(z.low, 5), "high": round(z.high, 5),
+             "label": z.label, "direction": z.direction, "t": z.t}
+            for z in frame.zones
+        ],
+        "swings": [
+            {"t": int(sw.t), "price": round(sw.price, 5), "kind": sw.kind}
+            for sw in frame.swings[-40:]
+        ],
+        "ema": {"ema20": round(frame.ema20, 5), "ema50": round(frame.ema50, 5)},
+        "structure": {
+            "tf": tf,
+            "value": frame.structure,
+            "bos": _break_text(frame.bos),
+            "choch": _break_text(frame.choch),
+            "range_high": frame.range_high,
+            "range_low": frame.range_low,
+            "atr_pips": round(frame.atr / PIP, 1),
+            "rsi": round(frame.rsi14, 0),
+            "notes": list(frame.notes[:8]),
+        },
+        "quote": None if quote is None else {"mid": round(quote.mid, 5), "spread_pips": quote.spread_pips},
+        "signals": marks,
+    }
+
+
+def levels_now(snap) -> list:
+    return day_week_levels(snap.candles.get("H1", []), int(utcnow().timestamp()))
 
 
 def market_payload(store: Store) -> dict:
