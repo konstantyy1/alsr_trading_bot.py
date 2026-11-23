@@ -321,8 +321,9 @@ def detect_setups(snap: Snapshot, frames: dict[str, Frame], levels: list[Zone], 
                     cancel_rules=cancel, invalidations=invalid,
                 ))
 
-    # Reject structurally valid but economically meaningless setups.
-    out = [c for c in out if min_risk_pips <= c.risk_pips <= max_risk_pips]
+    # Reject structurally valid but economically meaningless setups. Measured from
+    # the price the order actually fills at, not from the trigger price.
+    out = [c for c in out if min_risk_pips <= pips(entry_price(c.side, c.entry_low, c.entry_high), c.stop) <= max_risk_pips]
     return out
 
 
@@ -462,10 +463,24 @@ def new_signal_id(now) -> str:
     return f"{day}-{random.randint(0x1000, 0xFFFF):04X}"
 
 
+def entry_price(side: str, entry_low: float, entry_high: float) -> float:
+    """The price a filled order is accounted at.
+
+    A sell limit fills at the lower edge of the zone and a buy limit at the upper
+    edge, which is also what the lifecycle uses when it resolves the trade. Risk,
+    reward and position size must all be measured from this same price, otherwise
+    the reported pips and the realised R disagree.
+    """
+    return entry_high if side == "BUY" else entry_low
+
+
 def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Risk, now, symbol: str, news: NewsRisk) -> dict:
     widened = risk.cost_pips * PIP
     stop = cand.stop - widened / 2 if cand.side == "BUY" else cand.stop + widened / 2
-    risk_pips = pips(cand.trigger, stop)
+    fill = entry_price(cand.side, cand.entry_low, cand.entry_high)
+    risk_pips = pips(fill, stop)
+    reward_pips = pips(fill, cand.tp1)
+    rr = (reward_pips / risk_pips) if risk_pips > 0 else 0.0
     lots = (risk.account_equity * risk.risk_percent / 100) / (risk_pips * 10) if risk_pips > 0 else 0
     return {
         "id": new_signal_id(now),
@@ -480,14 +495,14 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
         "updated_at": now.isoformat(),
         "entry_low": cand.entry_low,
         "entry_high": cand.entry_high,
-        "trigger": cand.trigger,
+        "trigger": round(fill, 5),
         "stop": round(stop, 5),
         "tp1": cand.tp1,
         "tp2": cand.tp2,
         "tp3": cand.tp3,
-        "rr": cand.rr,
+        "rr": round(rr, 1),
         "risk_pips": round(risk_pips, 1),
-        "reward_pips": cand.reward_pips,
+        "reward_pips": round(reward_pips, 1),
         "expected_hold_min": cand.expected_hold_min,
         "max_hold_min": cand.max_hold_min,
         "session": session.active,

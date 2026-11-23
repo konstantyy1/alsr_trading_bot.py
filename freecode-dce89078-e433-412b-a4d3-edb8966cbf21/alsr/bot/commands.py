@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import notify
 from analysis import analyse, day_week_levels
-from config import ENV, PIP
+from config import ENV, PIP, chat_id, telegram_ready
 from datafeed import build_snapshot
 from lifecycle import positions_summary
 from markettime import day_bounds, news_risk, session_info, utcnow, warsaw_str
@@ -50,7 +50,7 @@ def handle_command(store: Store, text: str) -> str:
         logs = store.list_logs(5)
         lines = [
             "<b>Стан системи</b>",
-            f"Telegram: {'✅ налаштовано' if ENV.telegram_ready else '❌ немає токена або chat id'}",
+            f"Telegram: {'✅ налаштовано' if telegram_ready(store) else '❌ немає токена або чату'}",
             f"Джерело даних: Yahoo Finance (безкоштовне, без ключа)",
             f"База: {'Postgres' if store.backend == 'postgres' else 'SQLite (локальний фолбек)'}",
             f"Сигнали: {'⏸ пауза' if state.get('paused') else '▶️ активні'}",

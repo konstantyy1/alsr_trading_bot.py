@@ -385,6 +385,67 @@ def test_calendar_usable_gate() -> tuple[bool, str]:
     return not bad, f"6 cases as expected" if not bad else f"wrong: {bad}"
 
 
+def test_entry_price_geometry() -> tuple[bool, str]:
+    """Risk, reward, R:R and lot size must be measured from the fill price.
+
+    A sell limit fills at the lower edge of its zone and a buy limit at the upper
+    edge. The lifecycle accounts the trade from that same price, so reporting pips
+    from the trigger instead made the message and the realised R disagree.
+    """
+    from signals import entry_price
+
+    cases = {
+        "sell fills at lower edge": entry_price("SELL", 1.09782, 1.09830),
+        "buy fills at upper edge": entry_price("BUY", 1.09782, 1.09830),
+    }
+    expected = {"sell fills at lower edge": 1.09782, "buy fills at upper edge": 1.09830}
+    if cases != expected:
+        return False, f"wrong fill price: {cases}"
+
+    # SELL: fill 1.09782, stop 1.09846 → 6.4 pips, not 6.6 from the trigger 1.0978
+    fill = entry_price("SELL", 1.09782, 1.09830)
+    stop = 1.09846
+    tp1 = 1.09660
+    risk_pips = round(abs(fill - stop) / 0.0001, 1)
+    reward_pips = round(abs(fill - tp1) / 0.0001, 1)
+    ok = risk_pips == 6.4 and reward_pips == 12.2 and reward_pips > risk_pips
+    note = f"fill {fill}: risk {risk_pips} pips, reward {reward_pips} pips"
+    return ok, note
+
+
+def test_chat_binding() -> tuple[bool, str]:
+    """The dashboard binding must win over the environment and survive restarts."""
+    from config import ENV, bind_chat, chat_id
+    from store import Store
+
+    path = os.path.join(tempfile.mkdtemp(), "bind.db")
+    first = Store("")
+    first._sqlite_path = path
+    first._ready = False
+    env_value = ENV.telegram_chat_id
+
+    initial = chat_id(first)
+    bind_chat(first, "100200300")
+    after_bind = chat_id(first)
+
+    # A fresh Store instance reads the same saved value, like a restart would.
+    second = Store("")
+    second._sqlite_path = path
+    second._ready = False
+    after_restart = chat_id(second)
+
+    bind_chat(second, "")
+    after_clear = chat_id(second)
+
+    ok = (
+        initial == (env_value or "")
+        and after_bind == "100200300"
+        and after_restart == "100200300"
+        and after_clear == (env_value or "")
+    )
+    return ok, f"bind {after_bind!r} survives restart, cleared to {after_clear!r}"
+
+
 def test_news_feed_down_blocks() -> tuple[bool, str]:
     """If the calendar cannot be read, entries must be blocked, not assumed safe."""
     now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -404,6 +465,8 @@ TESTS = [
     ("News feed down blocks entries", test_news_feed_down_blocks),
     ("Calendar events survive storage", test_events_roundtrip_with_offset),
     ("Calendar usable gate", test_calendar_usable_gate),
+    ("Entry price geometry", test_entry_price_geometry),
+    ("Telegram chat binding", test_chat_binding),
     ("Lifecycle: SL", test_lifecycle_sl),
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),

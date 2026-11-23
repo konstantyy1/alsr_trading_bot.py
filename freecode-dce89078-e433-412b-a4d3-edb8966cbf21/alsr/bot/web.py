@@ -27,7 +27,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from wsgiref.simple_server import make_server
 
-from config import ENV
+from config import ENV, bind_chat, chat_id, telegram_ready
 from store import Store
 
 import api
@@ -227,11 +227,12 @@ def route_telegram_discover(environ, start_response):
             "hint": "Перевір TELEGRAM_BOT_TOKEN у налаштуваннях сервісу.",
         })
     ok, chats, err2, webhook_blocking = notify.discover_chats(ENV.telegram_token)
+    bound = chat_id(_STORE)
     return _json(environ, start_response, 200, {
         "bot_token_ok": True,
         "bot": {"username": me.get("username"), "name": me.get("first_name"), "id": me.get("id")},
         "chats": chats,
-        "chat_bound": ENV.telegram_chat_id or None,
+        "chat_bound": bound or None,
         "webhook_blocking_updates": webhook_blocking,
         "hint": (
             "Webhook уже встановлено, тому Telegram не віддає старі повідомлення. "
@@ -244,13 +245,28 @@ def route_telegram_discover(environ, start_response):
 
 
 def route_telegram_hello(environ, start_response):
-    """Send one confirmation message to the configured chat."""
-    if not ENV.telegram_ready:
-        return _json(environ, start_response, 200, {"sent": False, "error": "Немає TELEGRAM_BOT_TOKEN або TELEGRAM_CHAT_ID."})
-    text = notify.format_hello(True, ENV.telegram_chat_id, _STORE.backend, ENV.poll_interval_min)
-    ok, err = notify.send(ENV.telegram_token, ENV.telegram_chat_id, text)
+    """Send one confirmation message to the bound chat."""
+    target = chat_id(_STORE)
+    if not telegram_ready(_STORE):
+        return _json(environ, start_response, 200, {"sent": False, "error": "Немає TELEGRAM_BOT_TOKEN або привʼязаного чату."})
+    text = notify.format_hello(True, target, _STORE.backend, ENV.poll_interval_min)
+    ok, err = notify.send(ENV.telegram_token, target, text)
     _STORE.log("info" if ok else "error", "telegram", "hello sent" if ok else f"hello failed: {err}")
-    return _json(environ, start_response, 200, {"sent": ok, "error": err})
+    return _json(environ, start_response, 200, {"sent": ok, "error": err, "chat_id": target})
+
+
+def route_telegram_bind(environ, start_response):
+    """Bind (or clear) the delivery chat without editing service settings."""
+    try:
+        body = json.loads(_read_body(environ) or b"{}")
+    except (ValueError, TypeError):
+        return _json(environ, start_response, 400, {"error": "Некоректний JSON."})
+    value = str(body.get("chat_id") or "").strip()
+    if value and not (value.lstrip("-").isdigit()):
+        return _json(environ, start_response, 400, {"error": "chat_id має бути числом."})
+    bound = bind_chat(_STORE, value)
+    _STORE.log("info", "telegram", f"chat bound: {bound}" if bound else "chat unbound")
+    return _json(environ, start_response, 200, {"chat_id": bound or None, "telegram_ready": telegram_ready(_STORE)})
 
 
 def route_scan(environ, start_response):
@@ -294,13 +310,14 @@ def route_telegram(environ, start_response, secret: str) -> list:
         return _json(environ, start_response, 400, {"ok": False})
 
     message = update.get("message") or update.get("edited_message") or {}
-    chat_id = str((message.get("chat") or {}).get("id", ""))
+    incoming_chat = str((message.get("chat") or {}).get("id", ""))
     text = (message.get("text") or "").strip()
+    bound = chat_id(_STORE)
 
     if not text:
         return _json(environ, start_response, 200, {"ok": True})
-    if chat_id and ENV.telegram_chat_id and not _secure_eq(chat_id, str(ENV.telegram_chat_id)):
-        _STORE.log("warn", "telegram", f"Відхилено команду з чужого чату {chat_id}")
+    if incoming_chat and bound and not _secure_eq(incoming_chat, bound):
+        _STORE.log("warn", "telegram", f"Відхилено команду з чужого чату {incoming_chat}")
         return _json(environ, start_response, 200, {"ok": True})
 
     from commands import handle_command
@@ -309,7 +326,7 @@ def route_telegram(environ, start_response, secret: str) -> list:
         reply = handle_command(_STORE, text)
     except Exception as exc:  # noqa: BLE001
         reply = f"Помилка обробки команди: {notify._esc(exc)}"
-    ok, err = notify.send(ENV.telegram_token, chat_id or ENV.telegram_chat_id, reply)
+    ok, err = notify.send(ENV.telegram_token, incoming_chat or bound, reply)
     if not ok:
         _STORE.log("error", "telegram", str(err))
     return _json(environ, start_response, 200, {"ok": True})
@@ -354,6 +371,7 @@ def application(environ, start_response):
     POST_ROUTES = {
         "/api/telegram/discover": route_telegram_discover,
         "/api/telegram/hello": route_telegram_hello,
+        "/api/telegram/bind": route_telegram_bind,
     }
     if path in POST_ROUTES:
         if not _authorized(environ, query):

@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from analysis import analyse, day_week_levels
-from config import ENV, PIP
+from config import ENV, PIP, chat_id, telegram_ready
 from datafeed import build_snapshot
 from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
@@ -85,8 +85,8 @@ def status_payload(store: Store) -> dict:
             "scan_interval_min": ENV.poll_interval_min,
         },
         "telegram": {
-            "configured": ENV.telegram_ready,
-            "chat_bound": bool(ENV.telegram_chat_id),
+            "configured": telegram_ready(store),
+            "chat_bound": bool(chat_id(store)),
             "webhook_secret_set": bool(ENV.webhook_secret),
             "signals_enabled": ENV.enable_signals and not state.get("paused"),
         },

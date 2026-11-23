@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import notify
 from analysis import analyse, day_week_levels
-from config import ENV, PIP, SYMBOL
+from config import ENV, PIP, SYMBOL, chat_id, telegram_ready
 from datafeed import Snapshot, build_snapshot
 from lifecycle import OPEN_STATUSES, advance, apply
 from markettime import day_bounds, news_risk, session_info, utcnow
@@ -45,7 +45,7 @@ def _send_once(store: Store, key: str, kind: str, text: str, signal_id: str | No
     """Return ('sent'|'skipped'|'error', message)."""
     if not store.claim_message(key, kind, signal_id):
         return "skipped", None
-    ok, err = notify.send(ENV.telegram_token, ENV.telegram_chat_id, text)
+    ok, err = notify.send(ENV.telegram_token, chat_id(store), text)
     if not ok:
         store.release_message(key)
         return "error", err
@@ -103,7 +103,7 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
                 updated = apply(sig, event, now)
                 store.save_signal(updated)
                 result.updates.append(updated["id"])
-                if send and ENV.telegram_ready:
+                if send and telegram_ready(store):
                     outcome, err = _send_once(
                         store,
                         f"update:{updated['id']}:{updated['status']}",
@@ -218,7 +218,7 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
                     sig = build_signal(decision.candidate, snap, session, ENV.risk, now, SYMBOL, risk)
                     store.save_signal(sig)          # persist BEFORE sending
                     result.created.append(sig["id"])
-                    if send and ENV.telegram_ready:
+                    if send and telegram_ready(store):
                         outcome, err = _send_once(store, f"signal:{sig['id']}:READY", "signal_new", notify.format_signal(sig), sig["id"])
                         _tally(result, outcome, err)
                     store.log("info", "signal", f"Створено {sig['id']} {sig['side']} {sig['grade']} score={sig['score']}")

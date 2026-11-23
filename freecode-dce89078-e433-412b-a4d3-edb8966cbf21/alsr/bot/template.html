@@ -286,6 +286,7 @@
         <div id="conn" class="small muted">Перевіряю бота…</div>
         <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
           <button id="btnDiscover" type="button">Знайти chat ID</button>
+          <button id="btnBind" type="button">Привʼязати цей чат</button>
           <button id="btnHello" type="button">Надіслати тест у Telegram</button>
         </div>
         <div id="connResult" class="small" style="margin-top:10px"></div>
@@ -550,8 +551,12 @@
       <div class="chatpick"><span>Сигнали</span><b>${t.signals_enabled ? "▶️ увімкнені" : "⏸ пауза"}</b></div>`;
   }
 
-  async function post(path) {
-    const res = await fetch(path, { method: "POST", credentials: "same-origin", headers: { Accept: "application/json" } });
+  async function post(path, body) {
+    const res = await fetch(path, {
+      method: "POST", credentials: "same-origin",
+      headers: body ? { Accept: "application/json", "Content-Type": "application/json" } : { Accept: "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
     return res.json();
   }
 
@@ -565,11 +570,38 @@
         return;
       }
       const rows = (d.chats || []).map((c) =>
-        `<div class="chatpick"><span>${esc(c.title || c.type || "чат")}${c.username ? ` · @${esc(c.username)}` : ""}<br><span class="muted" style="font-size:11px">${esc(c.type || "")}</span></span><code>${esc(c.chat_id)}</code></div>`).join("");
+        `<div class="chatpick"><span>${esc(c.title || c.type || "чат")}${c.username ? ` · @${esc(c.username)}` : ""}<br><span class="muted" style="font-size:11px">${esc(c.type || "")}</span></span><button type="button" class="bindone" data-chat="${esc(c.chat_id)}">Привʼязати</button><code>${esc(c.chat_id)}</code></div>`).join("");
       $("connResult").innerHTML = `
-        <p style="margin:0 0 6px">Бот: <b>@${esc(d.bot?.username || "?")}</b>${d.chat_bound ? ` · привʼязаний chat <code>${esc(d.chat_bound)}</code>` : ""}</p>
+        <p style="margin:0 0 6px">Бот: <b>@${esc(d.bot?.username || "?")}</b>${d.chat_bound ? ` · привʼязаний чат <code>${esc(d.chat_bound)}</code>` : ""}</p>
         ${rows || `<p class="muted" style="margin:0">${esc(d.hint || "")}</p>`}
-        ${rows ? `<p class="muted" style="margin:8px 0 0">Скопіюй цей номер у змінну <code>TELEGRAM_CHAT_ID</code> і перезапусти сервіс.</p>` : ""}`;
+        ${rows ? `<p class="muted" style="margin:8px 0 0">Натисни «Привʼязати» навпроти свого чату — сигнали підуть туди.</p>` : ""}`;
+      document.querySelectorAll(".bindone").forEach((b) => b.addEventListener("click", () => bindChat(b.dataset.chat)));
+    } catch (e) {
+      $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    } finally { ev.target.disabled = false; }
+  });
+
+  async function bindChat(chatId) {
+    $("connResult").innerHTML = `<span class="muted">Привʼязую чат…</span>`;
+    try {
+      const d = await post("/api/telegram/bind", { chat_id: chatId });
+      $("connResult").innerHTML = d.chat_id
+        ? `<span style="color:var(--jade)">Готово — сигнали підуть у чат <code>${esc(d.chat_id)}</code>. Натисни «Надіслати тест у Telegram», щоб перевірити.</span>`
+        : `<div class="err">Чат не привʼязано.</div>`;
+      refresh();
+    } catch (e) {
+      $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    }
+  }
+
+  $("btnBind").addEventListener("click", async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const d = await post("/api/telegram/discover");
+      const chat = (d.chats || [])[0];
+      if (!d.bot_token_ok) { $("connResult").innerHTML = `<div class="err">Токен бота не працює: ${esc(d.error || "")}</div>`; return; }
+      if (!chat) { $("connResult").innerHTML = `<div class="err">Спочатку напиши боту /start у Telegram, потім натисни ще раз.</div>`; return; }
+      await bindChat(chat.chat_id);
     } catch (e) {
       $("connResult").innerHTML = `<div class="err">${esc(e.message)}</div>`;
     } finally { ev.target.disabled = false; }

@@ -75,4 +75,29 @@ class Env:
 
 ENV = Env()
 
+_SETTING_CHAT = "telegram_chat_id"
+
+
+def chat_id(store) -> str:
+    """The chat to deliver to: the dashboard binding first, then the environment.
+
+    Binding from the dashboard keeps the setup to one button and survives restarts
+    once a database is attached, without editing service settings.
+    """
+    try:
+        saved = store.get_setting(_SETTING_CHAT, None)
+    except Exception:  # noqa: BLE001 - a broken store must not break the dashboard
+        saved = None
+    return str(saved or ENV.telegram_chat_id or "")
+
+
+def bind_chat(store, value: str) -> str:
+    """Remember the chat id. An empty value unbinds it."""
+    store.set_setting(_SETTING_CHAT, value or None)
+    return chat_id(store)
+
+
+def telegram_ready(store) -> bool:
+    return bool(ENV.telegram_token and chat_id(store))
+
 PIP = 0.0001
