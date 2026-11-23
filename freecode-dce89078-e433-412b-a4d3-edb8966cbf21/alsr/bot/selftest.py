@@ -367,6 +367,61 @@ def test_store_dedupe() -> tuple[bool, str]:
     return ok, "claim/dedupe/release/state round-trip"
 
 
+def test_counter_trend_is_refused() -> tuple[bool, str]:
+    """Setups against the H4 trend must not become signals.
+
+    Over 59 days of real bars, counter-trend entries made 34 trades at a 28% win rate
+    for -13.49R, while aligned entries with score >= 87 made +15.02R at 57%. The filter
+    is therefore load-bearing: if it silently stops working, the losing group returns.
+    detect_setups is stubbed so the test isolates the filter and not the pattern code.
+    """
+    import signals as sig_mod
+    from config import DataCfg
+    from datafeed import Quality, Quote, Snapshot
+    from markettime import NewsRisk
+
+    now = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)  # London, not a blocked session
+    session = session_info(now)
+    quote = Quote(bid=1.0999, ask=1.1001, mid=1.1000, spread_pips=1.2, ts=now,
+                  provider="test", live=True, spread_is_assumed=True)
+    bars = [_c(int(now.timestamp()) - (80 - i) * 300, 1.1, 1.1006, 1.0994, 1.1) for i in range(90)]
+    snap = Snapshot(quote=quote, candles={"M5": bars, "M15": bars}, quality=Quality(True, "VERIFIED"),
+                    validator=None, generated_at=now)
+
+    from analysis import analyse
+
+    frames = {tf: analyse(tf, bars) for tf in ("M5", "M15", "H1", "H4")}
+    frames["H4"].structure = "bear"  # higher timeframe clearly down
+
+    def fake_detect(*_a, **_k):
+        return [sig_mod.Candidate(
+            side="BUY", setup="FVG_PULLBACK", entry_low=1.0995, entry_high=1.1005,
+            trigger=1.1005, stop=1.0990, tp1=1.1020, tp2=1.1035, tp3=None, rr=3.0,
+            risk_pips=15.0, reward_pips=15.0, expected_hold_min=60, max_hold_min=240,
+            context={}, why=[], cancel_rules=[], invalidations=[],
+        )]
+
+    original = sig_mod.detect_setups
+    sig_mod.detect_setups = fake_detect
+    try:
+        v = sig_mod.evaluate(snap, frames, [], session, NewsRisk("NONE", "чисто"),
+                             open_count=0, signals_today=0, daily_r=0.0,
+                             risk=Risk(), data_cfg=DataCfg())
+        refused = v.verdict == "NO_TRADE" and any("проти тренду H4" in d for d in v.details)
+
+        # Same setup with a matching trend must be allowed through the filter.
+        frames["H4"].structure = "bull"
+        v2 = sig_mod.evaluate(snap, frames, [], session, NewsRisk("NONE", "чисто"),
+                              open_count=0, signals_today=0, daily_r=0.0,
+                              risk=Risk(), data_cfg=DataCfg())
+        allowed = not any("проти тренду H4" in d for d in v2.details)
+    finally:
+        sig_mod.detect_setups = original
+
+    ok = refused and allowed
+    return ok, f"контртренд відхилено={refused}, за трендом пропущено={allowed}, verdict={v.verdict}"
+
+
 def test_backtest_thresholds_hold() -> tuple[bool, str]:
     """The thresholds must match the evidence, and A+ must stay rarer than A.
 
@@ -828,6 +883,7 @@ TESTS = [
     ("Store dedupe and state", test_store_dedupe),
     ("Score is not a win rate", test_score_is_not_winrate),
     ("Backtest thresholds hold", test_backtest_thresholds_hold),
+    ("Counter-trend is refused", test_counter_trend_is_refused),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

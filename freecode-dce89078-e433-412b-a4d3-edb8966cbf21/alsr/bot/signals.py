@@ -440,9 +440,22 @@ def evaluate(
     if not raw:
         return stop("NO_TRADE", "Жоден із п'яти сетапів не має підтвердження на M15/M5.")
 
-    for cand in raw:
+    # Trade only with the higher-timeframe trend. Over 59 days of real bars, setups
+    # that fought H4 lost 34 trades at a 28% win rate for -13.49R, while aligned setups
+    # with score >= 87 made +15.02R at 57% and stayed positive in both halves of the
+    # period and at 1.0 / 1.5 / 2.0 pips spread. A setup against H4 is kept as
+    # observation only, because the score alone does not separate them well enough.
+    h4_structure = frames["H4"].structure if frames.get("H4") else "range"
+    aligned = [c for c in raw
+               if h4_structure == "range" or h4_structure == ("bull" if c.side == "BUY" else "bear")]
+    if not aligned:
+        return stop("NO_TRADE", f"Усі сетапи проти тренду H4 ({h4_structure}). Бектест показав, що "
+                               f"контртрендові входи збиткові, тому вони не пропонуються.")
+
+    for cand in aligned:
         cand.score_parts = score_candidate(cand, frames, snap, session, news, data_cfg)
         cand.score = max(0, min(100, sum(p["points"] for p in cand.score_parts)))
+    raw = aligned
     raw.sort(key=lambda c: c.score, reverse=True)
     best = raw[0]
 
