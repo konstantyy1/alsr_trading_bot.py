@@ -77,10 +77,17 @@ def advance(signal: dict, m5: list[Candle], now: datetime) -> dict | None:
             if tp3 is None:
                 return {"status": "TP2_HIT", "price": tp2, "ts": c.t, "note": "TP2 досягнуто — фінальна ціль сценарію."}
             if state != "TP2_HIT":
-                return {"status": "TP2_HIT", "price": tp2, "ts": c.t, "note": "TP2 досягнуто, залишок тримаємо до TP3."}
+                return {"status": "TP2_HIT", "price": tp2, "ts": c.t,
+                        "note": "TP2 досягнуто — закрий усю позицію."}
         if hit1 and state in ("READY", "ACTIVE"):
+            # TP1 closes the whole position: it is a terminal status, so nothing is held
+            # afterwards. The earlier wording said "close the main part and hold the rest
+            # with a break-even stop", which described a partial exit this bot never
+            # takes. Measured over 20 trades the full close at TP1 beat every partial
+            # scheme (TP1 70/30, 50/50, hold to TP2, trailing), so the message now says
+            # what actually happens.
             return {"status": "TP1_HIT", "price": tp1, "ts": c.t,
-                    "note": "TP1 досягнуто — закрий основну частину; далі стоп тримаємо в беззбитку."}
+                    "note": "TP1 досягнуто — закрий усю позицію. Далі не тримаємо."}
         state = "TP2_HIT" if hit2 and state == "TP1_HIT" else state
 
         # Move the stop only after this bar has been checked against the old one, so a
