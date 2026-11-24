@@ -525,6 +525,112 @@ def test_stop_moves_are_not_spammy() -> tuple[bool, str]:
                       f"({r.trail_atr_mult}×ATR)")
 
 
+def test_zero_result_trade_is_still_a_trade() -> tuple[bool, str]:
+    """A trade closed by break-even ends at 0R and must still count as a trade.
+
+    Live case: one EUR/USD trade ended at break-even, and the dashboard read
+    "completed 1 · TP/SL 0/0 · win rate 0% · total 0R" - indistinguishable from
+    "nothing happened". The trade is real: the stop reached +0.75R, moved to the
+    entry, and took the position out flat. Zero result is a result.
+    """
+    from lifecycle import positions_summary
+
+    be = _signal(id="A", status="SL_HIT", resolved_at="2026-11-24T12:00:00+00:00",
+                 r_result=0.0, resolution={"status": "SL_HIT", "exit_kind": "BE"})
+    win = _signal(id="B", status="SL_HIT", resolved_at="2026-11-24T13:00:00+00:00",
+                  r_result=1.8, resolution={"status": "SL_HIT", "exit_kind": "TRAIL"})
+    loss = _signal(id="C", status="SL_HIT", resolved_at="2026-11-24T14:00:00+00:00",
+                   r_result=-1.0, resolution={"status": "SL_HIT", "exit_kind": "SL"})
+    s = positions_summary([be, win, loss])
+    ok = (s["closed"] == 3 and s["wins"] == 1 and s["losses"] == 1 and s["flat"] == 1
+          and s["total_r"] == 0.8)
+    detail = (f"завершено={s['closed']}, плюс={s['wins']}, мінус={s['losses']}, "
+              f"у нуль={s['flat']}, сума={s['total_r']}R")
+    return ok, detail
+
+
+def test_old_signal_keeps_its_own_exit_plan() -> tuple[bool, str]:
+    """A signal issued before 2.7.0 must not claim a trailing stop it never had.
+
+    Those signals carry no trail_start_r, so the card says plainly that the rule
+    written into the signal still applies and the new one starts with the next
+    signal. The alternative - showing the 2.7.0 rule on a 2.6.x signal - would
+    tell the owner to trail a stop that this trade was never planned with.
+    """
+    from notify import _exit_plan_lines
+
+    old = [l for l in _exit_plan_lines(_signal(trail_start_r=None, trail_atr_mult=None))]
+    new = [l for l in _exit_plan_lines(_signal())]
+    ok_old = any("TP1 закриває позицію" in l for l in old) and not any("трейлінг" in l for l in old)
+    ok_new = any("трейлінг" in l for l in new) and any("орієнтири" in l for l in new)
+    return ok_old and ok_new, f"старий сигнал={ok_old}, новий={ok_new}"
+
+
+def test_legacy_signal_never_trails() -> tuple[bool, str]:
+    """A signal issued before 2.7.0 has no trailing fields, so it only ever breaks even.
+
+    This is the trade the owner watched: entry 1.09457, stop 1.09354. The signal was
+    created before the deploy, so its card carried no trail_start_r. Run against a
+    price that peaks at +2.5R it still exits at break-even, because there was no
+    trailing rule to follow. The result is not "nothing happened" - the trade was up
+    - the rule simply had no way to keep any of it.
+    """
+    from lifecycle import evaluate_signal, realized_r
+    from datafeed import Candle
+
+    t0 = datetime(2026, 11, 24, 12, 5, tzinfo=UTC)
+    entry, stop = 1.09457, 1.09354
+    risk = entry - stop
+
+    def bar(m, o, h, l, c):
+        return Candle(int((t0 + timedelta(minutes=m)).timestamp()), o, h, l, c, 0.0, True)
+
+    legacy = {"created_at": t0.isoformat(), "side": "BUY", "status": "READY",
+              "entry_low": 1.09373, "entry_high": entry, "trigger": entry, "stop": stop,
+              "tp1": 1.09745, "tp2": 1.09839, "tp3": None, "max_hold_min": 240,
+              "break_even_at_r": 0.75}
+    modern = dict(legacy, trail_start_r=1.5, trail_atr_mult=1.0, trail_min_pips=1.5)
+
+    def run(sig, peak):
+        bars = [bar(0, entry, entry + 0.0002, entry - 0.0001, entry + 0.0001)]
+        px = entry
+        for i in range(1, 6):
+            hi = entry + peak * risk * (i / 5)
+            bars.append(bar(i * 5, px, max(hi, px), min(px, hi) - 0.0001, hi - 0.00004))
+            px = hi - 0.00004
+        for i in range(6, 14):
+            lo = px - (peak * risk) / 6
+            bars.append(bar(i * 5, px, px + 0.0001, lo, lo + 0.00004))
+            px = lo + 0.00004
+        st = evaluate_signal(sig, bars, bars[-1].t + 300)
+        return realized_r(sig, st["event"]["price"]), st["best_r"], st["event"]["exit_kind"]
+
+    r_old, peak_old, kind_old = run(legacy, 2.5)
+    r_new, _, kind_new = run(modern, 2.5)
+    ok = (r_old == 0.0 and kind_old == "BE" and peak_old > 1.0
+          and r_new > 1.0 and kind_new == "TRAIL")
+    return ok, (f"старий сигнал: {r_old:+.2f}R ({kind_old}), хоч пік {peak_old:.2f}R; "
+                f"новий: {r_new:+.2f}R ({kind_new})")
+
+
+def test_exit_rule_wording_is_unambiguous() -> tuple[bool, str]:
+    """The card must not read as "stop goes to +0.75R".
+
+    The rule is: once price reaches +0.75R the stop jumps to the ENTRY, which is
+    break-even and not profit. "Беззбиток на +0.75R" was read - reasonably - as
+    "stop at +0.75R", so the text now says where the stop goes and which level
+    triggers it, in that order.
+    """
+    from notify import _exit_plan_lines
+
+    text = " ".join(_exit_plan_lines(_signal()))
+    reaches = "+0.75R" in text
+    to_entry = "на вхід" in text
+    bad = "беззбиток на +0.75R" in text.lower() or "беззбиток на +" in text.lower()
+    return (reaches and to_entry and not bad), (
+        f"рівень +0.75R={reaches}, стоп на вхід={to_entry}, хибне формулювання={bad}")
+
+
 def test_signal_template() -> tuple[bool, str]:
     """Every promised field must survive a redesign of the message.
 
@@ -1146,6 +1252,10 @@ TESTS = [
     ("Live rule matches the backtest", test_trailing_matches_backtest),
     ("Stop move message is actionable", test_stop_move_message_is_actionable),
     ("Stop moves are not spammy", test_stop_moves_are_not_spammy),
+    ("Zero result is still a trade", test_zero_result_trade_is_still_a_trade),
+    ("Old signal keeps its exit plan", test_old_signal_keeps_its_own_exit_plan),
+    ("Legacy signal never trails", test_legacy_signal_never_trails),
+    ("Exit rule wording is unambiguous", test_exit_rule_wording_is_unambiguous),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

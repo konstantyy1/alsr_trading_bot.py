@@ -15,7 +15,7 @@ from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
-VERSION = "2.7.0"
+VERSION = "2.7.1"
 _started_at = datetime.now(timezone.utc)
 
 # A snapshot costs 4-5 upstream requests, so cache it briefly for the dashboard.
@@ -326,7 +326,12 @@ def stats_payload(store: Store, limit: int = 500) -> dict:
 
     wins = [s for s in closed if float(s["r_result"]) > 0]
     losses = [s for s in closed if float(s["r_result"]) < 0]
+    # A trade closed by break-even is a real trade with a real zero result: the stop
+    # moved to the entry and took the position out. Counting it only as "flat" made
+    # the card read "completed 1 · TP/SL 0/0 · win rate 0% · total 0R", which looks
+    # exactly like "nothing happened" when in fact one trade ran and ended at zero.
     flat = [s for s in closed if float(s["r_result"]) == 0]
+    be_hit = [s for s in flat if str((s.get("resolution") or {}).get("exit_kind")) == "BE"]
     total_r = sum(float(s["r_result"]) for s in closed)
 
     def group(field: str) -> list[dict]:
@@ -356,7 +361,10 @@ def stats_payload(store: Store, limit: int = 500) -> dict:
             "wins": len(wins),
             "losses": len(losses),
             "flat": len(flat),
-            "win_rate_pct": round(len(wins) / len(closed) * 100, 1) if closed else None,
+            # Of the zero-result trades, how many were closed by the break-even stop.
+            "break_even": len(be_hit),
+            "win_rate_pct": (round(len(wins) / (len(wins) + len(losses)) * 100, 1)
+                             if (len(wins) + len(losses)) else None),
             "total_r": round(total_r, 2),
             "expectancy_r": round(total_r / len(closed), 2) if closed else None,
             "avg_win_r": round(sum(float(s["r_result"]) for s in wins) / len(wins), 2) if wins else None,

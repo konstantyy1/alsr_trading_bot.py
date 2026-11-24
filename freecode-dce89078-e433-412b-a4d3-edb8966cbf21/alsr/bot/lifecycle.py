@@ -242,11 +242,13 @@ def positions_summary(signals: list[dict]) -> dict:
     final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None]
     wins = [s for s in final if (s["r_result"] or 0) > 0]
     losses = [s for s in final if (s["r_result"] or 0) < 0]
+    flat = [s for s in final if (s["r_result"] or 0) == 0]
     total_r = round(sum(s["r_result"] for s in final), 2)
     return {
         "closed": len(final),
         "wins": len(wins),
         "losses": len(losses),
+        "flat": len(flat),
         "total_r": total_r,
         "open": len([s for s in signals if s["status"] in OPEN_STATUSES]),
     }

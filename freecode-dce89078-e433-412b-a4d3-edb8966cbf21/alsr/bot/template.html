@@ -502,7 +502,9 @@
       <div class="ticket-body">${cells.map(([k, v]) => `<div class="cell"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
       <div class="ticket-foot">
         <p class="mono small" style="color:var(--dim)">${esc(s.id)} · ${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", dateStyle: "short", timeStyle: "short" }))} · утримання до ${esc(s.max_hold_min)} хв</p>
-        <p class="mono small" style="color:var(--dim)">Вихід: беззбиток +${esc(s.break_even_at_r ?? 0.75)}R → трейлінг ${esc(s.trail_atr_mult ?? 1)}×ATR з +${esc(s.trail_start_r ?? 1.5)}R. TP — орієнтири.</p>
+        ${s.trail_start_r == null
+          ? `<p class="mono small" style="color:var(--dim)">Вихід: сигнал створено до 2.7.0 — для нього діє план, записаний у сигналі. Новий трейлінг почнеться з наступного сигналу.</p>`
+          : `<p class="mono small" style="color:var(--dim)">Вихід: при +${esc(s.break_even_at_r ?? 0.75)}R стоп на вхід (беззбиток) → трейлінг ${esc(s.trail_atr_mult ?? 1)}×ATR з +${esc(s.trail_start_r)}R. TP — орієнтири.</p>`}
         <p>${esc(ctx.h1 || "")} · ${esc(ctx.m15 || "")}</p>
         ${why ? `<ul class="why-list">${why}</ul>` : ""}
       </div>
@@ -522,10 +524,14 @@
       const r = s.r_result;
       const rTxt = r === null || r === undefined ? "" : ` · ${r > 0 ? "+" : ""}${r}R`;
       const color = r > 0 ? "var(--jade)" : r < 0 ? "var(--red)" : "var(--muted)";
+      // Peak matters most on a zero result: "0R" alone hides that the trade was
+      // +0.9R up before the break-even stop took it out. The peak is where it got.
+      const peak = Number(s.best_r);
+      const peakTxt = Number.isFinite(peak) && peak >= 0.75 ? ` · пік +${peak.toFixed(2)}R` : "";
       return `<div class="row">
         <span class="when">${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}</span>
         <span class="body"><b>${esc(s.side)} ${esc(s.grade)}</b> · ${esc(s.status)}
-          <span class="meta">${esc(s.id)} · score ${esc(s.score)} · ${esc(s.setup)}</span></span>
+          <span class="meta">${esc(s.id)} · score ${esc(s.score)} · ${esc(s.setup)}${esc(peakTxt)}</span></span>
         <span class="mono" style="color:${color}">${esc(rTxt)}</span>
       </div>`;
     }).join("") : `<p class="empty">Історія порожня — система щойно запущена.</p>`;
@@ -536,18 +542,24 @@
     const r = p.results || {}, s = p.sample || {}, e = p.equity || {};
     const figs = [
       ["Завершено", String(s.closed ?? 0)],
-      ["TP / SL", `${r.wins ?? 0} / ${r.losses ?? 0}`],
+      ["У плюс / у мінус", `${r.wins ?? 0} / ${r.losses ?? 0}`],
+      ["Беззбиток", String(r.break_even ?? 0)],
       ["Win rate", r.win_rate_pct == null ? "—" : r.win_rate_pct + "%"],
       ["Сумарно R", r.total_r == null ? "—" : (r.total_r > 0 ? "+" : "") + r.total_r],
       ["Очікування", r.expectancy_r == null ? "—" : (r.expectancy_r > 0 ? "+" : "") + r.expectancy_r + "R"],
       ["Капітал", `$${Number(e.now ?? 0).toFixed(2)}`],
       ["Макс. просадка", e.max_drawdown_pct == null ? "—" : e.max_drawdown_pct + "%"],
     ];
-    const caution = s.enough_for_conclusions
-      ? `<div class="caution ok">Вибірка ${s.closed} угод. Цього достатньо для першої оцінки, але не для висновку про прибутковість.</div>`
-      : `<div class="caution">Лише ${s.closed} завершених угод. Будь-який відсоток тут — шум, не результат. Потрібно щонайменше 100.</div>`;
+    const zeroNote = (r.flat ?? 0) > 0
+      ? `<div class="caution">${r.flat} з ${s.closed} угод закрив беззбиток. Це не «нічого не було»: ціна дійшла до +0.75R, і стоп переїхав на ціну входу — тобто угода захищена від збитку, але прибутку ще не зафіксувала. Трейлінг починає тягнути стоп вище входу лише з +1.5R, тому між +0.75R і +1.5R результат лишається нульовим. Пік кожної такої угоди видно в історії.</div>`
+      : "";
+    const caution = zeroNote || ((s.closed ?? 0) === 0
+      ? `<div class="caution">Ще жодної завершеної угоди. Відсотки зʼявляться після першої закритої угоди.</div>`
+      : s.enough_for_conclusions
+        ? `<div class="caution ok">Вибірка ${s.closed} угод. Цього достатньо для першої оцінки, але не для висновку про прибутковість.</div>`
+        : `<div class="caution">Лише ${s.closed} завершених угод. Будь-який відсоток тут — шум, не результат. Потрібно щонайменше 100.</div>`);
     const bySetup = (p.by_setup || []).slice(0, 4).map((g) =>
-      `<div class="row"><span class="body">${esc(g.key)}<span class="meta">${g.count} угод · ${g.wins} TP</span></span>
+      `<div class="row"><span class="body">${esc(g.key)}<span class="meta">${g.count} угод · ${g.wins} у плюс</span></span>
        <span class="mono" style="color:${g.total_r > 0 ? "var(--jade)" : g.total_r < 0 ? "var(--red)" : "var(--muted)"}">${g.total_r > 0 ? "+" : ""}${g.total_r}R</span></div>`).join("");
     $("stats").innerHTML = `<div class="figures">${figs.map(([k, v]) => `<div class="fig"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
       ${caution}
