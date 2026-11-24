@@ -15,7 +15,7 @@ from lifecycle import OPEN_STATUSES, positions_summary
 from markettime import news_risk, session_info, utcnow, warsaw_str
 from store import Store
 
-VERSION = "2.7.1"
+VERSION = "2.7.2"
 _started_at = datetime.now(timezone.utc)
 
 # A snapshot costs 4-5 upstream requests, so cache it briefly for the dashboard.
@@ -308,7 +308,11 @@ def signals_payload(store: Store, limit: int = 40) -> dict:
 
 def stats_payload(store: Store, limit: int = 500) -> dict:
     sigs = store.list_signals(limit=limit)
-    closed = [s for s in sigs if s.get("resolved_at") and s.get("r_result") is not None]
+    # A cancelled signal was never filled, so it is not a trade. It is counted
+    # separately and kept out of every percentage.
+    cancelled = [s for s in sigs if s.get("status") == "CANCELLED"]
+    closed = [s for s in sigs if s.get("resolved_at") and s.get("r_result") is not None
+              and s.get("status") != "CANCELLED"]
     closed.sort(key=lambda s: str(s["resolved_at"]))
 
     start_equity = ENV.risk.account_equity
@@ -327,9 +331,8 @@ def stats_payload(store: Store, limit: int = 500) -> dict:
     wins = [s for s in closed if float(s["r_result"]) > 0]
     losses = [s for s in closed if float(s["r_result"]) < 0]
     # A trade closed by break-even is a real trade with a real zero result: the stop
-    # moved to the entry and took the position out. Counting it only as "flat" made
-    # the card read "completed 1 · TP/SL 0/0 · win rate 0% · total 0R", which looks
-    # exactly like "nothing happened" when in fact one trade ran and ended at zero.
+    # moved to the entry and took the position out, so it counts as a trade that ended
+    # flat - but it is still a trade, unlike a cancelled signal that was never filled.
     flat = [s for s in closed if float(s["r_result"]) == 0]
     be_hit = [s for s in flat if str((s.get("resolution") or {}).get("exit_kind")) == "BE"]
     total_r = sum(float(s["r_result"]) for s in closed)
@@ -353,6 +356,7 @@ def stats_payload(store: Store, limit: int = 500) -> dict:
     return {
         "sample": {
             "closed": len(closed),
+            "cancelled": len(cancelled),
             "open": len([s for s in sigs if s.get("status") in OPEN_STATUSES]),
             "total": len(sigs),
             "enough_for_conclusions": len(closed) >= 100,

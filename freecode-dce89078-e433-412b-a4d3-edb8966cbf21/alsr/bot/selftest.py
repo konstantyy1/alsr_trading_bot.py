@@ -181,11 +181,20 @@ def test_lifecycle_ambiguous_candle() -> tuple[bool, str]:
 
 
 def test_lifecycle_cancel() -> tuple[bool, str]:
-    now = datetime(2026, 11, 23, 11, 0, tzinfo=UTC)  # 60 min later, never touched
+    # The entry window is ENTRY_WAIT_MIN (60), so a scan at exactly 60 minutes must
+    # still be waiting; a little later the signal is closed as never filled.
+    from lifecycle import ENTRY_WAIT_MIN
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
     # BUY entry zone is 1.0995–1.1005, so a bar must stay ABOVE 1.1005 to miss it.
-    event = advance(_signal(), [_c(T0, 1.1010, 1.1014, 1.1008, 1.1012)], now)
-    ok = event is not None and event["status"] == "CANCELLED"
-    return ok, event["status"] if event else "no event"
+    bar = _c(T0, 1.1010, 1.1014, 1.1008, 1.1012)
+    on_time = advance(_signal(), [bar], created + timedelta(minutes=ENTRY_WAIT_MIN))
+    late = advance(_signal(), [bar], created + timedelta(minutes=ENTRY_WAIT_MIN + 5))
+    ok = (on_time is None and late is not None and late["status"] == "CANCELLED"
+          and late.get("exit_kind") == "NO_ENTRY")
+    return ok, (f"на {ENTRY_WAIT_MIN} хв: {on_time['status'] if on_time else 'чекає'}, "
+                f"після: {late['status'] if late else 'чекає'}/"
+                f"{(late or {}).get('exit_kind')}")
 
 
 def test_lifecycle_expiry() -> tuple[bool, str]:
@@ -629,6 +638,82 @@ def test_exit_rule_wording_is_unambiguous() -> tuple[bool, str]:
     bad = "беззбиток на +0.75R" in text.lower() or "беззбиток на +" in text.lower()
     return (reaches and to_entry and not bad), (
         f"рівень +0.75R={reaches}, стоп на вхід={to_entry}, хибне формулювання={bad}")
+
+
+def test_unfilled_signal_is_not_a_trade() -> tuple[bool, str]:
+    """A signal whose entry was never reached is not a completed trade.
+
+    Live case: price never came back to the entry zone, the signal expired unfilled,
+    and the dashboard read "Завершено 1 · TP/SL 0/0 · Win rate 0% · +0.00R". Nothing
+    was traded, so there is no result to show - it belongs in its own counter.
+    """
+    from lifecycle import positions_summary
+
+    unfilled = _signal(id="A", status="CANCELLED", resolved_at="2026-11-24T13:05:00+00:00",
+                       r_result=0.0, resolution={"status": "CANCELLED", "exit_kind": "NO_ENTRY"})
+    traded = _signal(id="B", status="SL_HIT", resolved_at="2026-11-24T14:00:00+00:00",
+                     r_result=1.8, resolution={"status": "SL_HIT", "exit_kind": "TRAIL"})
+    s = positions_summary([unfilled, traded])
+    ok = (s["closed"] == 1 and s["cancelled"] == 1 and s["wins"] == 1
+          and s["total_r"] == 1.8)
+    return ok, (f"угод={s['closed']}, без входу={s['cancelled']}, "
+                f"сума={s['total_r']}R")
+
+
+def test_card_says_it_is_a_limit_order() -> tuple[bool, str]:
+    """A zone 2.3 pips below the market must not read as "buy now".
+
+    Live case: the card showed "Вхід: 1.09373 – 1.09457" while price was 1.09480.
+    The owner read that as a range to buy in, entered at market, and the plan's limit
+    never filled - so the bot closed a signal he considered his open trade. The card
+    now states the distance and that the entry waits for a pullback.
+    """
+    from notify import _entry_wait_lines
+
+    above = " ".join(_entry_wait_lines(_signal(quote_at_creation=1.09480, entry_low=1.09373,
+                                              entry_high=1.09457)))
+    inside = " ".join(_entry_wait_lines(_signal(quote_at_creation=1.0940, entry_low=1.09373,
+                                               entry_high=1.09457)))
+    ok = ("лімітна" in above and "2.3 pips" in above and "1.09457" in above
+          and "зараз" in inside and "лімітна" not in inside)
+    return ok, (f"поза зоною: відстань і слово 'лімітна'={('лімітна' in above)}, "
+                f"у зоні: 'зараз'={('зараз' in inside)}")
+
+
+def test_manual_fill_reports_real_risk() -> tuple[bool, str]:
+    """A fill reported with /took must move break-even, not just the label.
+
+    The plan expected 1.09457; the owner entered at 1.09480. Measuring R from the plan
+    would put break-even 4 pips higher than the money he actually risked, and the
+    trailing stop would sit in the wrong place.
+    """
+    from lifecycle import entry_price_of, realized_r
+
+    planned = _signal()                                     # buy, entry 1.1005, stop 1.0985
+    manual = _signal(fill_price=1.0960)                     # entered 45 pips higher
+    # Break-even must sit on the real fill: +0.75R from 1.0960, not from 1.1005.
+    be_manual = 1.0960 + 0.75 * abs(1.0960 - 1.0985)
+    be_planned = 1.1005 + 0.75 * abs(1.1005 - 1.0985)
+    reach = realized_r(manual, be_manual)
+    ok = (entry_price_of(manual) == 1.0960 and entry_price_of(planned) == 1.1005
+          and reach == 0.75 and abs(be_manual - be_planned) > 0.003)
+    return ok, (f"вхід із /took={entry_price_of(manual)}, з плану={entry_price_of(planned)}, "
+                f"на беззбитку {reach}R, різниця рівнів {abs(be_manual - be_planned) * 10000:.0f} pips")
+
+
+def test_entry_wait_covers_real_fills() -> tuple[bool, str]:
+    """The entry window must be wide enough for the entries the setup really gets.
+
+    On 41 real trades 40 filled within 45 minutes and one at minute 50, so the old
+    hardcoded 45 threw away a trade the plan had called for. The window is now 60.
+    """
+    from lifecycle import ENTRY_WAIT_MIN
+
+    fits_most = ENTRY_WAIT_MIN >= 50      # covers the slowest real fill
+    not_forever = ENTRY_WAIT_MIN <= 90    # a signal must still expire
+    return fits_most and not_forever, (f"вікно входу {ENTRY_WAIT_MIN} хв — "
+                                       f"покриває найповільніший вхід (50), "
+                                       f"але сигнал усе ще згорає")
 
 
 def test_signal_template() -> tuple[bool, str]:
@@ -1256,6 +1341,10 @@ TESTS = [
     ("Old signal keeps its exit plan", test_old_signal_keeps_its_own_exit_plan),
     ("Legacy signal never trails", test_legacy_signal_never_trails),
     ("Exit rule wording is unambiguous", test_exit_rule_wording_is_unambiguous),
+    ("Unfilled signal is not a trade", test_unfilled_signal_is_not_a_trade),
+    ("Entry wait covers real fills", test_entry_wait_covers_real_fills),
+    ("Card says it is a limit order", test_card_says_it_is_a_limit_order),
+    ("Manual fill reports real risk", test_manual_fill_reports_real_risk),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

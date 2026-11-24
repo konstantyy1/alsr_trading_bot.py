@@ -258,6 +258,34 @@ def _exit_plan_lines(sig: dict) -> list[str]:
     ]
 
 
+def _entry_wait_lines(sig: dict) -> list[str]:
+    """Say plainly that this is a limit order and whether the entry is still ahead.
+
+    The live case that caused the confusion: the card showed a zone, the price sat
+    2.3 pips above it, and "Вхід: 1.09373 – 1.09457" read like "buy somewhere in here
+    now". Nothing said the order only fills if price comes BACK down. The reader went
+    in immediately at market, the planned limit never filled, and the bot closed a
+    signal the owner thought was his open trade.
+    """
+    started = sig.get("quote_at_creation")
+    low, high = sig.get("entry_low"), sig.get("entry_high")
+    if started is None or low is None or high is None:
+        return ["<i>Це лімітна заявка: вхід відкриється, коли ціна дійде до зони.</i>"]
+    started = float(started)
+    out = []
+    if low <= started <= high:
+        out.append("<i>Ціна вже в зоні — вхід можна відкривати зараз.</i>")
+    else:
+        away = abs(started - (high if started > high else low)) / 0.0001
+        where = "вище" if started > high else "нижче"
+        edge = high if started > high else low
+        out.append(f"<i>⚠️ Це лімітна заявка, а не «купити зараз». Ціна на момент сигналу "
+                   f"{_f5(started)} — {away:.1f} pips {where} зони. Вхід відкриється лише "
+                   f"тоді, коли ціна повернеться до {_f5(edge)}. Зайшов раніше за цією "
+                   f"ціною — це інша угода, і тобі слід сказати про це боту.</i>")
+    return out
+
+
 def format_signal(sig: dict) -> str:
     """One signal, readable on a phone in a couple of glances.
 
@@ -297,6 +325,7 @@ def format_signal(sig: dict) -> str:
         f"└ TP3: <b>{tp3}</b>",
         "",
         f"<b>Ризик/прибуток 1:{sig['rr']}</b> · тримати {sig['expected_hold_min']}–{sig['max_hold_min']} хв",
+        *(_entry_wait_lines(sig)),
         *(_exit_plan_lines(sig)),
         f"Позиція {pos.get('lots', 0)} lot · ризик {pos.get('risk_amount', 0)} USD",
         "",
@@ -310,7 +339,7 @@ def format_signal(sig: dict) -> str:
         *[f"• {_esc(w)}" for w in sig.get("why", [])],
         "",
         f"{_news_badge(sig.get('news_risk', ''))}",
-        f"Спред: {sig['spread_at_creation']} pips (припущення) · ціна на вході {_f5(sig['quote_at_creation'])}",
+        f"Спред: {sig['spread_at_creation']} pips (припущення) · ціна на момент сигналу {_f5(sig['quote_at_creation'])}",
         f"Джерело: {_esc(sig['provider'])} · <code>{sig['id']}</code>",
     ]
 
@@ -344,9 +373,16 @@ def format_update(sig: dict, note: str) -> str:
     elif status == "SL_HIT" and str((sig.get("resolution") or {}).get("exit_kind")) == "TRAIL":
         icon = "✅ трейлінг закрив у плюс"
 
+    # A cancelled signal that never filled is not "cancelled for a reason" - it simply
+    # never became a trade. Say that, because "скасовано" reads like a decision.
+    if status == "CANCELLED" and str((sig.get("resolution") or {}).get("exit_kind")) == "NO_ENTRY":
+        icon = "⚪ входу не було"
+
     r_line = ""
-    if r is not None:
+    if r is not None and status != "CANCELLED":
         r_line = f"Результат: <b>{r:+.2f}R</b>" if r else "Результат: <b>0.00R</b>"
+    elif status == "CANCELLED":
+        r_line = "Угода не відкривалась."
 
     # Where the stop stands now. This is the one number the owner has to act on when
     # a trade is open, so it is shown on every update rather than only at the start.
@@ -372,6 +408,8 @@ def format_update(sig: dict, note: str) -> str:
             plan.append("Закрив трейлінг — прибуток зафіксовано.")
         elif kind == "BE":
             plan.append("Закрив беззбиток — нульовий результат.")
+        elif kind == "NO_ENTRY":
+            plan.append("Ціна не зайшла в зону входу — сигнал згорів, нічого не відкривалось.")
     elif status == "ACTIVE" and sig.get("trail_start_r") is not None:
         # Direction-neutral on purpose: for a SELL the stop travels downwards, so any
         # wording built on "above"/"below" would be wrong half the time.
@@ -510,7 +548,9 @@ def format_stats(signals: list[dict], equity: float, start_equity: float, risk_p
     refuses to claim an edge from a handful of trades. Percentages on a small sample
     are misleading, so a warning appears until there is enough data to mean something.
     """
-    final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None]
+    final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None
+             and s.get("status") != "CANCELLED"]
+    cancelled = [s for s in signals if s.get("status") == "CANCELLED"]
     # "Open" means "no result yet". Counting by status would double-count TP hits,
     # which stay listed in the open set while already carrying a result.
     open_now = [s for s in signals if not (s.get("resolved_at") and s.get("r_result") is not None)]
@@ -537,7 +577,8 @@ def format_stats(signals: list[dict], equity: float, start_equity: float, risk_p
 
     lines += [
         f"Усього сигналів: <b>{len(signals)}</b>",
-        f"Завершено: <b>{len(final)}</b> · відкрито: <b>{len(open_now)}</b>",
+        f"Завершено: <b>{len(final)}</b> · відкрито: <b>{len(open_now)}</b>"
+        + (f" · скасовано до входу: {len(cancelled)}" if cancelled else ""),
         "",
         "<b>Результат</b>",
         f"Сумарно: <b>{total_r:+.2f}R</b>",

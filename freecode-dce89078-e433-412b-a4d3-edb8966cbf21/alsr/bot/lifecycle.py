@@ -21,6 +21,11 @@ from datetime import datetime, timedelta, timezone
 
 from datafeed import Candle
 
+# How long a signal may wait for its entry to fill. Measured on 41 real trades: 40
+# filled within 45 minutes and one at minute 50, so 60 keeps every trade the setup was
+# meant to take while still closing the ones the market never gave an entry on.
+ENTRY_WAIT_MIN = 60
+
 # Statuses that end a signal. TP1_HIT / TP2_HIT / TP3_HIT stay listed because signals
 # created by 2.6.x and earlier were stored with them and must keep counting as closed.
 TERMINAL = {"TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "CANCELLED", "EXPIRED", "UNDETERMINED"}
@@ -68,6 +73,20 @@ def _exit_kind(price: float, entry: float, original_stop: float) -> str:
     return "TRAIL"
 
 
+def entry_price_of(signal: dict) -> float:
+    """The price the position was actually opened at.
+
+    Normally the edge of the plan's zone: a buy limit fills at its upper edge, a sell
+    limit at its lower one. But the plan says "виконання вручну", so the owner may have
+    taken it at a different price and reported it with /took. When that happens every R
+    figure - break-even, trailing, realised result - must be measured from the real
+    fill, not from the price the plan hoped for.
+    """
+    if signal.get("fill_price") is not None:
+        return float(signal["fill_price"])
+    return signal["entry_high"] if signal["side"] == "BUY" else signal["entry_low"]
+
+
 def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None) -> dict:
     """Replay one signal against closed M5 bars.
 
@@ -79,7 +98,7 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
     result is a pure function of the signal and the bars.
     """
     is_buy = signal["side"] == "BUY"
-    entry = signal["entry_high"] if is_buy else signal["entry_low"]
+    entry = entry_price_of(signal)
     original_stop = float(signal["stop"])
     risk = abs(entry - original_stop)
     stop = original_stop
@@ -87,9 +106,13 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
     if risk <= 0:
         return empty
 
-    created = _parse(signal["created_at"]).timestamp()
     created_dt = _parse(signal["created_at"])
-    relevant = [c for c in m5 if c.t >= created and c.complete]
+    # A manually reported fill starts the replay at the fill, not at the signal.
+    # Otherwise the bars between the alert and the real entry would be replayed as if
+    # the position had been open through them, and a dip that happened before the
+    # owner entered could take a stop he never had.
+    start_dt = _parse(signal["filled_at"]) if signal.get("filled_at") else created_dt
+    relevant = [c for c in m5 if c.t >= start_dt.timestamp() and c.complete]
     if not relevant:
         return empty
     atr = _atr_series(m5)
@@ -127,11 +150,15 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
             if not touched:
                 # The wait clock runs out on its own, so it is checked here rather
                 # than after the loop: an unfilled signal must not scan days of bars.
-                if clock(c) - created_dt > timedelta(minutes=45):
+                # The window follows the signal's own plan (60-210 min on the card),
+                # not a hardcoded 45: on 41 real trades one entry filled at minute 50,
+                # and a fixed 45 would have thrown that trade away.
+                if clock(c) - created_dt > timedelta(minutes=ENTRY_WAIT_MIN):
                     return {"event": {"status": "CANCELLED", "price": signal["trigger"],
                                       "ts": c.t + 300,
-                                      "note": "Вхід не активовано за 45 хв — сценарій скасовано без угоди.",
-                                      "exit_kind": "TIME", "r_at_exit": 0.0},
+                                      "note": (f"Ціна не зайшла в зону входу за {ENTRY_WAIT_MIN} хв — "
+                                               f"входу не було, угода не відкривалась."),
+                                      "exit_kind": "NO_ENTRY", "r_at_exit": 0.0},
                             "stop": stop, "best_r": best_r, "kind": "SL", "moved": False}
                 continue
             state = "ACTIVE"
@@ -213,7 +240,7 @@ def advance(signal: dict, m5: list[Candle], now: datetime | None = None) -> dict
 
 def realized_r(signal: dict, exit_price: float) -> float:
     is_buy = signal["side"] == "BUY"
-    entry = signal["entry_high"] if is_buy else signal["entry_low"]
+    entry = entry_price_of(signal)
     risk = abs(entry - signal["stop"])
     if risk <= 0:
         return 0.0
@@ -239,13 +266,19 @@ def apply(signal: dict, event: dict, now: datetime) -> dict:
 
 
 def positions_summary(signals: list[dict]) -> dict:
-    final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None]
+    # A cancelled signal never got filled: the price never reached the entry zone, so
+    # no position ever existed. Counting it as a "completed trade" with 0R made the
+    # dashboard read "Завершено 1 · TP/SL 0/0" after a day in which nothing was traded.
+    final = [s for s in signals if s.get("resolved_at") and s.get("r_result") is not None
+             and s.get("status") != "CANCELLED"]
+    cancelled = [s for s in signals if s.get("status") == "CANCELLED"]
     wins = [s for s in final if (s["r_result"] or 0) > 0]
     losses = [s for s in final if (s["r_result"] or 0) < 0]
     flat = [s for s in final if (s["r_result"] or 0) == 0]
     total_r = round(sum(s["r_result"] for s in final), 2)
     return {
         "closed": len(final),
+        "cancelled": len(cancelled),
         "wins": len(wins),
         "losses": len(losses),
         "flat": len(flat),

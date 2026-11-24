@@ -22,6 +22,7 @@ HELP_TEXT = "\n".join([
     "",
     "<b>Сценарії й результат</b>",
     "/setups — відкриті сценарії",
+    "/took [ціна] — я зайшов вручну, веди цю угоду",
     "/stats — статистика і відсоток виграшів",
     "/history — останні сигнали",
     "/why — чому останнє рішення таке",
@@ -146,6 +147,9 @@ def handle_command(store: Store, text: str) -> str:
             return "Активних сценаріїв немає. Відсутність сигналу — теж результат."
         return "\n\n———\n\n".join(notify.format_signal(s) for s in open_signals)
 
+    if cmd == "/took":
+        return _cmd_took(store, text, now)
+
     if cmd == "/history":
         recent = store.list_signals(limit=12)
         if not recent:
@@ -187,6 +191,78 @@ def handle_command(store: Store, text: str) -> str:
         return "\n".join(lines)
 
     return "Невідома команда. /start — список команд."
+
+
+def _cmd_took(store: Store, text: str, now) -> str:
+    """Record a manual fill on the newest signal that never filled by itself.
+
+    The plan is executed by hand, so the bot can only see the market - not the owner's
+    account. Without this the two can disagree: the plan waits for a limit that never
+    fills, while the owner is already in the trade and watching it run.
+    """
+    parts = (text or "").strip().split()
+    price: float | None = None
+    if len(parts) > 1:
+        try:
+            price = float(parts[1].replace(",", "."))
+        except ValueError:
+            return "Не зрозумів ціну. Приклад: <code>/took 1.09480</code>"
+
+    pending = store.list_signals(statuses=["READY", "CANCELLED"], limit=10)
+    if not pending:
+        return "Немає сигналу, до якого можна прив'язати вхід."
+
+    sig = None
+    # The window follows each signal's own holding limit plus a margin, not a fixed
+    # 4 hours: a trade can run to its max_hold, and the live signal 20261124-1733 was
+    # still open after that mark — /took would have refused the very trade it is for.
+    for s in pending:
+        created = notify._dt(s.get("created_at"))
+        if created is None:
+            continue
+        horizon = timedelta(minutes=int(s.get("max_hold_min") or 240) + 120)
+        if (now - created) > horizon:
+            continue
+        sig = s
+        break
+    if sig is None:
+        return ("Останній сигнал уже поза своїм часом утримання — прив'язувати вхід "
+                "до нього немає сенсу. Наступний сигнал прийде звичайним шляхом.")
+
+    if price is None:
+        price = float(sig["trigger"])
+    low, high = float(sig["entry_low"]), float(sig["entry_high"])
+    side = sig["side"]
+    # A fill outside the plan's zone is allowed - the owner reports what the broker
+    # shows - but it is named, because every R from here is measured from it.
+    outside = price < min(low, float(sig["stop"])) or price > max(high, float(sig["tp1"]))
+
+    updated = dict(sig)
+    updated["status"] = "ACTIVE"
+    updated["fill_price"] = round(price, 5)
+    updated["filled_at"] = now.isoformat()
+    updated["updated_at"] = now.isoformat()
+    updated.pop("resolved_at", None)
+    updated.pop("r_result", None)
+    updated.pop("resolution", None)
+    store.save_signal(updated)
+
+    risk = abs(price - float(sig["stop"])) / 0.0001
+    r_now = (price - float(sig["stop"])) / 0.0001
+    lines = [
+        "<b>✅ Вхід записано — бот веде цю угоду</b>",
+        f"Ціна входу: <b>{price:.5f}</b> · стоп <b>{float(sig['stop']):.5f}</b> "
+        f"— {r_now:.1f} pips ризику",
+        "",
+        f"Далі: коли ціна дійде до <b>{(price + 0.75 * risk * 0.0001):.5f}</b> (+0.75R) — "
+        f"стоп на вхід, беззбиток. З +1.5R стоп рухається за ціною.",
+        "<i>TP1/TP2 — орієнтири, угоду вони не закривають.</i>",
+    ]
+    if outside:
+        lines += ["", "⚠️ Ціна далеко від зони плану. Всі R рахуються від твоєї ціни "
+                      f"{price:.5f}, тому стоп {float(sig['stop']):.5f} дає {r_now:.0f} pips ризику."]
+    lines += ["", f"<sub>{notify._esc(sig['id'])}</sub>"]
+    return "\n".join(lines)
 
 
 def _fmt_iso(value) -> str:

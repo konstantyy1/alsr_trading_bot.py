@@ -480,6 +480,22 @@
     $("verdictAt").textContent = new Date(d.at).toLocaleTimeString("pl-PL", { timeZone: "Europe/Warsaw", hour: "2-digit", minute: "2-digit" });
   }
 
+  // A zone is a limit order, not a price to buy at right now. Without this line the
+  // ticket read "Вхід: 1.09373 – 1.09457" while price sat 2.3 pips above it, and the
+  // owner entered at market - the plan's limit then never filled and the bot closed a
+  // signal he considered his open trade.
+  function entryHint(s) {
+    const now = Number(s.quote_at_creation), lo = Number(s.entry_low), hi = Number(s.entry_high);
+    if (!Number.isFinite(now) || !Number.isFinite(lo) || !Number.isFinite(hi)) return "";
+    if (now >= lo && now <= hi) {
+      return `<p class="mono small" style="color:var(--jade)">Ціна вже в зоні — вхід можна відкривати зараз.</p>`;
+    }
+    const edge = now > hi ? hi : lo;
+    const away = Math.abs(now - edge) / 0.0001;
+    const where = now > hi ? "вище" : "нижче";
+    return `<p class="mono small" style="color:var(--amber)">⚠️ Лімітна заявка: ціна ${fx5(now)} — ${away.toFixed(1)} pips ${where} зони. Вхід відкриється лише на ${fx5(edge)}. Зайшов раніше — це інша угода: напиши в Telegram <b>/took ${fx5(now)}</b>, і бот вестиме її від твоєї ціни.</p>`;
+  }
+
   function ticket(s) {
     const sideColor = s.side === "BUY" ? "var(--jade)" : "var(--red)";
     const cells = [
@@ -505,6 +521,7 @@
         ${s.trail_start_r == null
           ? `<p class="mono small" style="color:var(--dim)">Вихід: сигнал створено до 2.7.0 — для нього діє план, записаний у сигналі. Новий трейлінг почнеться з наступного сигналу.</p>`
           : `<p class="mono small" style="color:var(--dim)">Вихід: при +${esc(s.break_even_at_r ?? 0.75)}R стоп на вхід (беззбиток) → трейлінг ${esc(s.trail_atr_mult ?? 1)}×ATR з +${esc(s.trail_start_r)}R. TP — орієнтири.</p>`}
+        ${entryHint(s)}
         <p>${esc(ctx.h1 || "")} · ${esc(ctx.m15 || "")}</p>
         ${why ? `<ul class="why-list">${why}</ul>` : ""}
       </div>
@@ -553,7 +570,10 @@
     const zeroNote = (r.flat ?? 0) > 0
       ? `<div class="caution">${r.flat} з ${s.closed} угод закрив беззбиток. Це не «нічого не було»: ціна дійшла до +0.75R, і стоп переїхав на ціну входу — тобто угода захищена від збитку, але прибутку ще не зафіксувала. Трейлінг починає тягнути стоп вище входу лише з +1.5R, тому між +0.75R і +1.5R результат лишається нульовим. Пік кожної такої угоди видно в історії.</div>`
       : "";
-    const caution = zeroNote || ((s.closed ?? 0) === 0
+    const noEntryNote = (s.cancelled ?? 0) > 0 && (s.closed ?? 0) === 0
+      ? `<div class="caution">Угод ще не було. ${s.cancelled} сигнал${s.cancelled === 1 ? "" : "ів"} скасовано, бо ціна не зайшла в зону входу — входу не сталося, тому й результату немає. Це не програш і не нуль: просто не було угоди.</div>`
+      : "";
+    const caution = zeroNote || noEntryNote || ((s.closed ?? 0) === 0
       ? `<div class="caution">Ще жодної завершеної угоди. Відсотки зʼявляться після першої закритої угоди.</div>`
       : s.enough_for_conclusions
         ? `<div class="caution ok">Вибірка ${s.closed} угод. Цього достатньо для першої оцінки, але не для висновку про прибутковість.</div>`
