@@ -565,6 +565,12 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
         "max_hold_min": cand.max_hold_min,
         # Lifecycle reads this to move the stop to entry once 0.75R is banked.
         "break_even_at_r": risk.break_even_at_r,
+        # ...and these to keep trailing it afterwards. TP1-TP3 above stay in the
+        # message as reference levels; from 2.7.0 they no longer close the trade.
+        "trail_start_r": risk.trail_start_r,
+        "trail_atr_mult": risk.trail_atr_mult,
+        "trail_min_pips": risk.trail_min_pips,
+        "trail_stop": round(stop, 5),
         "session": session.active,
         "quote_at_creation": snap.quote.mid if snap.quote else cand.trigger,
         "spread_at_creation": snap.quote.spread_pips if snap.quote else 0,

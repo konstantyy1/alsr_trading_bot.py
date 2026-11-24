@@ -58,6 +58,17 @@ class Risk:
     # and stayed positive in both halves and at 1.0/1.5/2.0 pips spread.
     tp1_scale: float = _f("TP1_SCALE", 1.1)
     break_even_at_r: float = _f("BREAK_EVEN_AT_R", 0.75)
+    # Trailing stop since 2.7.0. Chosen by the worst-slice test, not by the highest
+    # total: 6 time slices x 3 spread levels on 59 days of EUR/USD M5, 41 trades.
+    #   +1.5R start / 1.0xATR  -> +22.60R, dd -2.57R, better in 15 of 18 slices
+    #   +1.5R start / 0.5R fixed -> +20.61R, dd -2.68R, better in 9 of 18
+    #   +2.0R start / 1.0xATR  -> +24.73R, dd -3.60R, deeper drawdown
+    # ATR beats a fixed distance because the median trailing gap lands at 0.42R
+    # (10th pct 0.29R, 90th 0.65R) and widens by itself in a volatile session.
+    # The floor keeps the gap above 1.5 pips so it can never sit inside the spread.
+    trail_start_r: float = _f("TRAIL_START_R", 1.5)
+    trail_atr_mult: float = _f("TRAIL_ATR_MULT", 1.0)
+    trail_min_pips: float = _f("TRAIL_MIN_PIPS", 1.5)
 
 
 @dataclass(frozen=True)

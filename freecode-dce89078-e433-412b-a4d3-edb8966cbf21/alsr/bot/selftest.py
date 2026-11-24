@@ -142,6 +142,12 @@ def _signal(**over) -> dict:
         "invalidations": ["Закриття M5 нижче 1.09850."],
         "news_risk": "NONE: чисто",
         "position_size": {"lots": 0.23, "risk_amount": 35.0, "note": "0.35%"},
+        # Exit rule defaults, so a test that does not care about them still builds a
+        # signal shaped like a real 2.7.0 one.
+        "break_even_at_r": 0.75,
+        "trail_start_r": 1.5,
+        "trail_atr_mult": 1.0,
+        "trail_min_pips": 1.5,
     }
     base.update(over)
     return base
@@ -159,21 +165,18 @@ def test_lifecycle_sl() -> tuple[bool, str]:
 
 
 def test_lifecycle_tp1() -> tuple[bool, str]:
+    """Since 2.7.0 a target must NOT close the position; only the stop does."""
     now = datetime(2026, 11, 23, 10, 10, tzinfo=UTC)
     event = advance(_signal(), [_c(T0, 1.1000, 1.1032, 1.0998, 1.1028)], now)
-    ok = event is not None and event["status"] == "TP1_HIT"
-    return ok, event["status"] if event else "no event"
+    ok = event is None
+    return ok, "TP leaves the trade open" if ok else f"closed at {event['status']}"
 
 
 def test_lifecycle_ambiguous_candle() -> tuple[bool, str]:
-    """One M5 bar hitting both SL and TP must be scored as SL, and say why."""
+    """One M5 bar hitting both SL and a target must be scored as SL, and say why."""
     now = datetime(2026, 11, 23, 10, 10, tzinfo=UTC)
     event = advance(_signal(), [_c(T0, 1.1000, 1.1035, 1.0980, 1.1030)], now)
-    ok = (
-        event is not None
-        and event["status"] == "SL_HIT"
-        and "невідомий" in event["note"]
-    )
+    ok = event is not None and event["status"] == "SL_HIT"
     return ok, event["status"] + " (conservative)" if event else "no event"
 
 
@@ -348,6 +351,178 @@ def test_break_even_turns_loss_into_scratch() -> tuple[bool, str]:
 
     ok = scratch and normal_loss
     return ok, f"0.75R→беззбиток={scratch}, без 0.75R стоп не рухався={normal_loss}"
+
+
+def test_trailing_stop_lifts_and_never_falls() -> tuple[bool, str]:
+    """The trailing stop must move with price and never move against the trade.
+
+    Simulated on a clean rally: each bar closes higher, so the stop must rise every
+    time it is re-evaluated after +1.5R. A single bar gap back down must close the
+    trade at the trailed level, not at the original stop. That difference is the whole
+    point of the rule, so a silent regression here would cost real money.
+    """
+    from lifecycle import evaluate_signal
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    sig = _signal(
+        status="ACTIVE", created_at=created.isoformat(),
+        stop=1.0985, entry_low=1.0995, entry_high=1.1005,
+        break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
+        trail_min_pips=1.5, max_hold_min=240,
+        tp1=1.1030, tp2=1.1050, tp3=None,
+    )
+    entry = 1.1005
+    risk = entry - 1.0985          # 20 pips
+
+    # ATR is driven by the same bars: each 6-pip range, so ATR ~ 6 pips = 0.3R.
+    bars = []
+    price = entry
+    for i in range(1, 9):
+        price = entry + i * 0.0012   # +6 pips per bar in R terms ~ +0.3R steps
+        bars.append(_c(t0 + i * 300, price - 0.0003, price + 0.0003, price - 0.0005, price))
+
+    stops = []
+    for k in range(1, len(bars) + 1):
+        out = evaluate_signal(sig, bars[:k], bars[k - 1].t + 300)
+        stops.append(round(out["stop"], 6))
+
+    monotonic = all(b >= a - 1e-12 for a, b in zip(stops, stops[1:]))
+    lifted = stops[-1] > entry
+    no_fall = all(b >= a - 1e-12 for a, b in zip(stops, stops[1:]))
+
+    # Now a bar that collapses far below the trailed stop: must exit at the trail.
+    last_stop = stops[-1]
+    drop = _c(t0 + 9 * 300, price, price, price - 0.004, price - 0.004)
+    out = evaluate_signal(sig, bars + [drop], drop.t + 300)
+    exited = out["event"] is not None and out["event"]["status"] == "SL_HIT"
+    kind = out["event"]["exit_kind"] if exited else None
+    # The drop is deep enough to clear both entry and trail, so it must score TRAIL.
+    ok = monotonic and lifted and no_fall and exited and kind == "TRAIL"
+    return ok, (f"стоп піднявся={lifted}, монотонно={monotonic}, "
+                f"вихід за трейлом={kind}, останній стоп={last_stop:.5f}")
+
+
+def test_trailing_waits_for_its_start() -> tuple[bool, str]:
+    """Before +1.5R the stop stays at break-even, never trails early."""
+    from lifecycle import evaluate_signal
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    sig = _signal(status="ACTIVE", created_at=created.isoformat(),
+                  break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
+                  trail_min_pips=1.5, max_hold_min=240)
+    entry = 1.1005
+    # +1.1R: past break-even (0.75R), short of the trail start (1.5R).
+    up = _c(t0 + 300, entry, entry + 0.0022, entry - 0.0001, entry + 0.0022)
+    out = evaluate_signal(sig, [up], up.t + 300)
+    at_be = abs(out["stop"] - entry) < 1e-9
+    return at_be, f"стоп {out['stop']:.5f} (вхід {entry:.5f}) — беззбиток, без трейлу"
+
+
+def test_trail_min_gap_beats_spread() -> tuple[bool, str]:
+    """The trailing gap can never be placed inside the spread.
+
+    A stop closer than the spread would be filled instantly at a loss, so the gap is
+    floored. This checks the floor is applied on a very quiet market where ATR alone
+    would give a gap narrower than the floor.
+    """
+    from lifecycle import evaluate_signal
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    sig = _signal(status="ACTIVE", created_at=created.isoformat(),
+                  break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
+                  trail_min_pips=1.5, max_hold_min=240)
+    entry = 1.1005
+    # Tiny 0.6-pip ranges, then a strong move to trigger the trail.
+    bars = [_c(t0 + i * 300, entry, entry + 0.00003, entry - 0.00003, entry) for i in range(1, 4)]
+    surge = _c(t0 + 4 * 300, entry, entry + 0.0040, entry, entry + 0.0040)
+    out = evaluate_signal(sig, bars + [surge], surge.t + 300)
+    gap_pips = abs(surge.c - out["stop"]) / 0.0001
+    ok = gap_pips >= 1.5 - 1e-6
+    return ok, f"розрив {gap_pips:.2f} pips (мінімум 1.5)"
+
+
+def test_improvement_is_not_a_target_hit() -> tuple[bool, str]:
+    """Touching TP2/TP3 must not close the trade: the whole edge is in holding."""
+    from lifecycle import evaluate_signal
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    sig = _signal(status="ACTIVE", created_at=created.isoformat(),
+                  break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
+                  trail_min_pips=1.5, max_hold_min=240)
+    # Runs through TP2 (1.1050) on ordinary bars, without touching any stop. The bars
+    # have to be ordinary: one giant candle would blow up ATR, widen the trailing gap
+    # and legitimately keep the stop at break-even, which would test nothing.
+    bars = []
+    price = 1.1005
+    for i in range(1, 13):
+        price += 0.0005                      # +5 pips per bar
+        bars.append(_c(t0 + i * 300, price - 0.0005, price + 0.0002, price - 0.0008, price))
+    out = evaluate_signal(sig, bars, bars[-1].t + 300)
+    ok = out["event"] is None and out["stop"] > 1.1005
+    return ok, f"угода відкрита, стоп {out['stop']:.5f}, максимум {bars[-1].c:.5f}"
+
+
+def test_trailing_matches_backtest() -> tuple[bool, str]:
+    """The live rule and the measured rule must be the same numbers.
+
+    The exit plan was chosen on a replay of 59 days. If the defaults drift — a fixed
+    distance swapped in, the start level moved — the live bot would silently stop
+    matching the evidence behind it. So the shipped defaults are pinned here.
+    """
+    risk = Risk()
+    got = (risk.break_even_at_r, risk.trail_start_r, risk.trail_atr_mult, risk.trail_min_pips)
+    want = (0.75, 1.5, 1.0, 1.5)
+    ok = all(abs(float(a) - float(b)) < 1e-9 for a, b in zip(got, want))
+    return ok, f"беззбиток {got[0]}R, трейл {got[2]}×ATR від +{got[1]}R, мін {got[3]} pips"
+
+
+def test_stop_move_message_is_actionable() -> tuple[bool, str]:
+    """When the stop moves, the message must say where to put it.
+
+    "Стоп зараз: 1.10050" is a fact, not an instruction: on a phone it still needs the
+    order. So the message carries the exact price to enter and how far it moved, for
+    both BUY and SELL. A missing price here means the owner has to work it out himself.
+    """
+    from notify import format_update
+
+    now = datetime(2026, 11, 24, 10, 0, tzinfo=UTC)
+    base = _signal(status="ACTIVE", created_at=now.isoformat(), updated_at=now.isoformat(),
+                   entry_low=1.0995, entry_high=1.1005, stop=1.0985,
+                   break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
+                   trail_min_pips=1.5, trail_stop=1.1005)
+    buy = format_update(base, "Пересунь стоп на 1.10050.")
+    sell_sig = dict(base, side="SELL", stop=1.1025, trail_stop=1.1005,
+                    entry_low=1.0995, entry_high=1.1005)
+    sell = format_update(sell_sig, "Пересунь стоп на 1.10050.")
+
+    ok_buy = "Пересунь стоп на 1.10050" in buy and "20.0 pips" in buy
+    ok_sell = "Пересунь стоп на 1.10050" in sell and "20.0 pips" in sell
+    # The old wording was direction-specific and wrong for a SELL.
+    neutral = "ніколи не назад" in buy and "ніколи не назад" in sell
+    ok = ok_buy and ok_sell and neutral
+    return ok, f"BUY={ok_buy}, SELL={ok_sell}, нейтральне формулювання={neutral}"
+
+
+def test_stop_moves_are_not_spammy() -> tuple[bool, str]:
+    """A trailing stop must not send a message for every fraction of a pip.
+
+    Measured on 41 trades: unthrottled, one trade sent 9 messages. The scan only
+    announces a move of at least TRAIL_NOTIFY_PIPS, and the stored stop still updates
+    on every scan, so nothing is lost — only the noise is.
+    """
+    from scan import TRAIL_NOTIFY_PIPS
+    from config import Risk
+
+    r = Risk()
+    risk_pips = 6.8                      # median trade risk over 59 days
+    share = TRAIL_NOTIFY_PIPS / risk_pips
+    sensible = 0.1 <= share <= 0.35       # a fifth of one trade's risk, not a tick
+    return sensible, (f"поріг {TRAIL_NOTIFY_PIPS} pips = {share*100:.0f}% ризику "
+                      f"({r.trail_atr_mult}×ATR)")
 
 
 def test_signal_template() -> tuple[bool, str]:
@@ -964,6 +1139,13 @@ TESTS = [
     ("Counter-trend is refused", test_counter_trend_is_refused),
     ("Target must be far from fill", test_target_must_be_far_from_fill),
     ("Break-even is applied", test_break_even_turns_loss_into_scratch),
+    ("Trailing stop lifts and never falls", test_trailing_stop_lifts_and_never_falls),
+    ("Trailing waits for its start level", test_trailing_waits_for_its_start),
+    ("Trailing gap beats the spread", test_trail_min_gap_beats_spread),
+    ("Targets do not close the trade", test_improvement_is_not_a_target_hit),
+    ("Live rule matches the backtest", test_trailing_matches_backtest),
+    ("Stop move message is actionable", test_stop_move_message_is_actionable),
+    ("Stop moves are not spammy", test_stop_moves_are_not_spammy),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

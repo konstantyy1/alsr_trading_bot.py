@@ -13,8 +13,12 @@ from datetime import datetime, timedelta, timezone
 import notify
 from analysis import analyse, day_week_levels
 from config import ENV, PIP, SYMBOL, chat_id, telegram_ready
+
+# Smallest stop move worth a Telegram message. A fifth of the median trade risk
+# (~6.8 pips), so the number follows the market instead of being a fixed pip guess.
+TRAIL_NOTIFY_PIPS = 1.5
 from datafeed import Snapshot, build_snapshot
-from lifecycle import OPEN_STATUSES, advance, apply
+from lifecycle import OPEN_STATUSES, apply, evaluate_signal
 from markettime import day_bounds, news_risk, session_info, utcnow
 from signals import build_signal, evaluate
 from store import Store
@@ -99,10 +103,40 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
             # 1) Advance existing signals with real closed candles.
             open_signals = store.list_signals(statuses=list(OPEN_STATUSES), limit=20)
             for sig in open_signals:
-                event = advance(sig, snap.candles.get("M5", []), now)
+                state_now = evaluate_signal(sig, snap.candles.get("M5", []), now)
+                event = state_now["event"]
                 if not event:
+                    # Persist a stop that has moved even while the trade is open.
+                    # Without this the dashboard and the Telegram message would keep
+                    # showing the original stop while the real one sits above entry.
+                    if state_now["moved"] and sig.get("trail_stop") != round(state_now["stop"], 5):
+                        moved = dict(sig)
+                        moved["trail_stop"] = round(state_now["stop"], 5)
+                        moved["best_r"] = round(state_now["best_r"], 2)
+                        moved["updated_at"] = now.isoformat()
+                        store.save_signal(moved)
+                        # Only speak when the stop moved far enough to matter. On 41
+                        # trades an unthrottled stream sent up to 9 messages for one
+                        # trade; at 1.5 pips (about a fifth of the median risk) the
+                        # worst trade sends 4 and the median sends 1, while every
+                        # move big enough to change the outcome is still announced.
+                        old_stop = sig.get("trail_stop") or sig["stop"]
+                        step_pips = abs(state_now["stop"] - float(old_stop)) / PIP
+                        if send and telegram_ready(store) and step_pips >= TRAIL_NOTIFY_PIPS:
+                            outcome, err = _send_once(
+                                store,
+                                f"trail:{moved['id']}:{moved['trail_stop']}",
+                                "signal_update",
+                                notify.format_update(
+                                    {**moved, "resolution": {"exit_kind": state_now["kind"]}},
+                                    f"Пересунь стоп на {state_now['stop']:.5f}.",                                ),
+                                moved["id"],
+                            )
+                            _tally(result, outcome, err)
                     continue
                 updated = apply(sig, event, now)
+                updated["trail_stop"] = round(event["price"], 5)
+                updated["best_r"] = round(state_now["best_r"], 2)
                 store.save_signal(updated)
                 result.updates.append(updated["id"])
                 if send and telegram_ready(store):

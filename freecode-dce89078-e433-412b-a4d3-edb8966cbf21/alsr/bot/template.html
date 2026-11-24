@@ -485,7 +485,7 @@
     const cells = [
       ["Вхід", `${fx5(s.entry_low)}–${fx5(s.entry_high)}`],
       ["Тригер", fx5(s.trigger)],
-      ["SL", fx5(s.stop)],
+      ["SL", fx5(s.trail_stop || s.stop)],
       ["TP1", fx5(s.tp1)],
       ["TP2", fx5(s.tp2)],
       ["TP3", s.tp3 ? fx5(s.tp3) : "—"],
@@ -502,6 +502,7 @@
       <div class="ticket-body">${cells.map(([k, v]) => `<div class="cell"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
       <div class="ticket-foot">
         <p class="mono small" style="color:var(--dim)">${esc(s.id)} · ${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", dateStyle: "short", timeStyle: "short" }))} · утримання до ${esc(s.max_hold_min)} хв</p>
+        <p class="mono small" style="color:var(--dim)">Вихід: беззбиток +${esc(s.break_even_at_r ?? 0.75)}R → трейлінг ${esc(s.trail_atr_mult ?? 1)}×ATR з +${esc(s.trail_start_r ?? 1.5)}R. TP — орієнтири.</p>
         <p>${esc(ctx.h1 || "")} · ${esc(ctx.m15 || "")}</p>
         ${why ? `<ul class="why-list">${why}</ul>` : ""}
       </div>

@@ -29,6 +29,14 @@ def _f5(v) -> str:
         return "—"
 
 
+def _g(v, default: str = "—") -> str:
+    """Short number for a rule description: 1.0 -> "1", 0.75 -> "0.75"."""
+    try:
+        return f"{float(v):g}"
+    except (TypeError, ValueError):
+        return default
+
+
 def send(token: str, chat_id: str, text: str, *, disable_preview: bool = True) -> tuple[bool, str | None]:
     if not token or not chat_id:
         return False, "Telegram не налаштовано"
@@ -230,6 +238,25 @@ def _news_badge(raw: str) -> str:
     return f"⚠️ Новини: {_esc(text)}"
 
 
+def _exit_plan_lines(sig: dict) -> list[str]:
+    """The exit rule, written from the signal's own settings.
+
+    Read from the signal instead of hardcoded text, so a signal stored by 2.6.x —
+    which has no trailing fields — shows the rule it was actually issued under rather
+    than a "—" placeholder it never had.
+    """
+    be = sig.get("break_even_at_r")
+    start = sig.get("trail_start_r")
+    mult = sig.get("trail_atr_mult")
+    if start is None or mult is None:
+        return [f"<b>План виходу:</b> беззбиток на +{_g(be, '0.75')}R, TP1 закриває позицію."]
+    return [
+        f"<b>План виходу:</b> беззбиток на +{_g(be, '0.75')}R, "
+        f"далі трейлінг {_g(mult, '1')}×ATR з +{_g(start, '1.5')}R.",
+        "TP1–TP3 — <b>орієнтири</b>, не команда закривати. Повну позицію тримаємо до стопу або трейлінгу.",
+    ]
+
+
 def format_signal(sig: dict) -> str:
     """One signal, readable on a phone in a couple of glances.
 
@@ -269,8 +296,7 @@ def format_signal(sig: dict) -> str:
         f"└ TP3: <b>{tp3}</b>",
         "",
         f"<b>Ризик/прибуток 1:{sig['rr']}</b> · тримати {sig['expected_hold_min']}–{sig['max_hold_min']} хв",
-        f"План виходу: TP1 — закрити всю позицію. TP2/TP3 — орієнтири, якщо ціна піде далі. "
-        f"Коли прибуток дійде 0.75R, стоп на вхід (беззбиток).",
+        *(_exit_plan_lines(sig)),
         f"Позиція {pos.get('lots', 0)} lot · ризик {pos.get('risk_amount', 0)} USD",
         "",
         "<b>Чому</b> <i>(score — відповідність правилам, не ймовірність)</i>",
@@ -310,10 +336,45 @@ def format_update(sig: dict, note: str) -> str:
         "EXPIRED": "⌛ прострочено",
         "UNDETERMINED": "❔ результат неясний",
     }.get(status, status)
+    # A break-even exit is recorded as SL_HIT because that is where the stop sat, but
+    # a red "stop" icon on a zero-result trade reads as a loss. Say what happened.
+    if status == "SL_HIT" and str((sig.get("resolution") or {}).get("exit_kind")) == "BE":
+        icon = "➖ беззбиток"
+    elif status == "SL_HIT" and str((sig.get("resolution") or {}).get("exit_kind")) == "TRAIL":
+        icon = "✅ трейлінг закрив у плюс"
 
     r_line = ""
     if r is not None:
         r_line = f"Результат: <b>{r:+.2f}R</b>" if r else "Результат: <b>0.00R</b>"
+
+    # Where the stop stands now. This is the one number the owner has to act on when
+    # a trade is open, so it is shown on every update rather than only at the start.
+    res = sig.get("resolution") or {}
+    kind = str(res.get("exit_kind") or "")
+    stop_now = sig.get("trail_stop")
+    closed = status in ("SL_HIT", "CANCELLED", "EXPIRED", "UNDETERMINED", "TP1_HIT", "TP2_HIT", "TP3_HIT")
+    plan = []
+    if stop_now is not None and not closed:
+        # Where the stop is now, and how far it moved. Plain text, not markup: these
+        # lines are escaped as a whole, so an inner tag would arrive as "&lt;b&gt;".
+        if sig.get("stop") is not None:
+            move = abs(float(stop_now) - float(sig["stop"])) / 0.0001
+            if move >= 0.05:
+                plan.append(f"Стоп зараз: {_f5(stop_now)} "
+                            f"({move:.1f} pips від початкового {_f5(sig['stop'])}).")
+            else:
+                plan.append(f"Стоп зараз: {_f5(stop_now)}.")
+    # "Закрив трейлінг" only holds when the trade really is over. While it is open the
+    # same exit_kind just means where the stop currently sits.
+    if closed:
+        if kind == "TRAIL":
+            plan.append("Закрив трейлінг — прибуток зафіксовано.")
+        elif kind == "BE":
+            plan.append("Закрив беззбиток — нульовий результат.")
+    elif status == "ACTIVE" and sig.get("trail_start_r") is not None:
+        # Direction-neutral on purpose: for a SELL the stop travels downwards, so any
+        # wording built on "above"/"below" would be wrong half the time.
+        plan.append("Стоп рухається за ціною в бік прибутку і ніколи не назад.")
 
     lines = [
         f"<b>{_esc(_pair(sig['symbol']))} {side}</b>",
@@ -321,6 +382,7 @@ def format_update(sig: dict, note: str) -> str:
         r_line,
         "",
         _esc(note),
+        *[f"<i>{_esc(p)}</i>" for p in plan],
         "",
         f"<sub>{warsaw_clock(_dt(sig['updated_at'] or sig['created_at']))} · <code>{sig['id']}</code></sub>",
     ]
