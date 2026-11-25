@@ -161,8 +161,14 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                 # not a hardcoded 45: on 41 real trades one entry filled at minute 50,
                 # and a fixed 45 would have thrown that trade away.
                 if clock(c) - created_dt > timedelta(minutes=ENTRY_WAIT_MIN):
+                    # The recorded time is the moment the window was judged closed, not
+                    # the close of the bar that happened to be last in the feed. With a
+                    # stale feed those differ a lot: 20261125-106B was created at 08:20,
+                    # cancelled by a 09:25 scan, and stored with 08:30 - so the history
+                    # read "cancelled 10 minutes after it appeared" while the note said
+                    # the 60-minute window had run out. The scan clock is the honest one.
                     return {"event": {"status": "CANCELLED", "price": signal["trigger"],
-                                      "ts": c.t + 300,
+                                      "ts": int(clock(c).timestamp()),
                                       "note": (f"Ціна не зайшла в зону входу за {ENTRY_WAIT_MIN} хв — "
                                                f"входу не було, угода не відкривалась."),
                                       "exit_kind": "NO_ENTRY", "r_at_exit": 0.0},

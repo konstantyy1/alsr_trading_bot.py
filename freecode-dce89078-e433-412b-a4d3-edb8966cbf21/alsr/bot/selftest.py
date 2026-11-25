@@ -751,6 +751,29 @@ def test_manual_fill_reports_real_risk() -> tuple[bool, str]:
                 f"на беззбитку {reach}R, різниця рівнів {abs(be_manual - be_planned) * 10000:.0f} pips")
 
 
+def test_expiry_time_matches_the_decision() -> tuple[bool, str]:
+    """A cancelled signal must be stamped with the moment it was judged, not the bar.
+
+    Live case 20261125-106B: created 08:20, cancelled by a 09:25 scan, stored with
+    08:30 because the timestamp came from the last closed bar in the feed. The history
+    then read "cancelled 9 minutes after it appeared" while the note claimed the
+    60-minute window had run out - two contradictory statements about one signal.
+    """
+    sig = _signal(status="READY")
+    # Ten quiet bars, none of them reaching the 1.0995-1.1005 zone.
+    bars = [_c(T0 + i * 300, 1.1010, 1.1016, 1.1008, 1.1012) for i in range(10)]
+    # The scan runs much later than the last bar: 08:20 created, 09:25 judged.
+    judged = datetime(2026, 11, 23, 11, 25, tzinfo=UTC)
+    state = evaluate_signal({**sig, "created_at": datetime(2026, 11, 23, 10, 20, tzinfo=UTC).isoformat()},
+                            bars, judged)
+    event = state["event"]
+    stamp = datetime.fromtimestamp(event["ts"], tz=UTC) if event else None
+    ok = (event is not None and event["status"] == "CANCELLED"
+          and stamp is not None and stamp >= judged - timedelta(seconds=1))
+    return ok, (f"подія={event['status'] if event else None}, "
+                f"час={stamp.strftime('%H:%M') if stamp else '—'} при рішенні {judged.strftime('%H:%M')}")
+
+
 def test_entry_wait_covers_real_fills() -> tuple[bool, str]:
     """The entry window must be wide enough for the entries the setup really gets.
 
@@ -1472,6 +1495,7 @@ TESTS = [
     ("Exit rule wording is unambiguous", test_exit_rule_wording_is_unambiguous),
     ("Unfilled signal is not a trade", test_unfilled_signal_is_not_a_trade),
     ("Entry wait covers real fills", test_entry_wait_covers_real_fills),
+    ("Expiry time matches the decision", test_expiry_time_matches_the_decision),
     ("Card says it is a limit order", test_card_says_it_is_a_limit_order),
     ("Manual fill reports real risk", test_manual_fill_reports_real_risk),
     ("Fill is announced", test_fill_is_announced),
