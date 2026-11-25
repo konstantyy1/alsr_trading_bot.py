@@ -672,6 +672,44 @@ def test_unfilled_signal_is_not_a_trade() -> tuple[bool, str]:
                 f"сума={s['total_r']}R")
 
 
+def test_cancelled_signal_does_not_use_daily_limit() -> tuple[bool, str]:
+    """A setup the price never reached must not spend one of the day's two slots.
+
+    Live case 2026-11-25: 20261125-106B was cancelled at 09:20 with "входу не було",
+    one real trade followed, and the bot then blocked the whole rest of the day with
+    "Денний ліміт сигналів 2 вичерпано". Nothing was traded twice - a setup that never
+    opened simply took half the allowance with it.
+    """
+    import scan
+    from lifecycle import positions_summary
+
+    unfilled = _signal(id="A", status="CANCELLED", resolved_at="2026-11-23T10:30:00+00:00",
+                       r_result=0.0, resolution={"status": "CANCELLED", "exit_kind": "NO_ENTRY"})
+    # Same shape, but stored by 2.7.0 and earlier: no exit_kind, only the sentence.
+    legacy = _signal(id="B", status="CANCELLED", resolved_at="2026-11-23T11:30:00+00:00",
+                     r_result=0.0,
+                     resolution={"status": "CANCELLED",
+                                 "note": "Вхід не активовано за 45 хв — сценарій скасовано без угоди."})
+    traded = _signal(id="C", status="SL_HIT", resolved_at="2026-11-23T12:00:00+00:00",
+                     r_result=-1.0, resolution={"status": "SL_HIT", "exit_kind": "SL"})
+
+    class FakeStore:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def list_signals(self, statuses=None, limit=50):
+            return self.rows
+
+    now = datetime(2026, 11, 23, 15, 0, tzinfo=UTC)
+    counted = scan._today_signals(FakeStore([unfilled, legacy, traded]), now)
+    split = scan._today_signals_split(FakeStore([unfilled, legacy, traded]), now)
+    ok = (len(counted) == 1 and counted[0]["id"] == "C"
+          and split["cancelled"] == 2
+          and positions_summary([unfilled, legacy, traded])["cancelled"] == 2)
+    return ok, (f"у ліміт пішло {len(counted)} угод, без входу {split['cancelled']}, "
+                f"старі записи теж розпізнані")
+
+
 def test_card_says_it_is_a_limit_order() -> tuple[bool, str]:
     """A zone 2.3 pips below the market must not read as "buy now".
 
@@ -1440,6 +1478,7 @@ TESTS = [
     ("Fill and stop on one bar", test_same_bar_fill_and_stop_is_announced),
     ("Break-even is announced", test_break_even_is_announced),
     ("Cancelled setup is not reissued", test_cancelled_setup_is_not_reissued),
+    ("Cancelled signal keeps the daily slot", test_cancelled_signal_does_not_use_daily_limit),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

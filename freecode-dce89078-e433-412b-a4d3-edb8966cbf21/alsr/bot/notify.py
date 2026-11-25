@@ -716,12 +716,13 @@ def format_stats(signals: list[dict], equity: float, start_equity: float, risk_p
     return "\n".join(lines)
 
 
-def format_daily(day: str, signals: list[dict], equity: float, start_equity: float, risk_percent: float) -> str:
+def format_daily(day: str, signals: list[dict], equity: float, start_equity: float,
+                 risk_percent: float, cancelled: int = 0) -> str:
     final = [s for s in signals if s.get("resolved_at")]
     wins = [s for s in final if (s.get("r_result") or 0) > 0]
     losses = [s for s in final if (s.get("r_result") or 0) < 0]
     total_r = sum(s.get("r_result") or 0 for s in final)
-    return "\n".join([
+    lines = [
         f"<b>Підсумок дня {day}</b>",
         "",
         f"Завершено: {len(final)} · TP: {len(wins)} · SL: {len(losses)}",
@@ -730,9 +731,13 @@ def format_daily(day: str, signals: list[dict], equity: float, start_equity: flo
         "",
         ("<b>Угоди</b>\n" + "\n".join(f"• {s['side']} {s['grade']} → {s['status']} ({s.get('r_result') or 0:+.2f}R)" for s in final))
         if final else "Завершених угод сьогодні немає.",
-        "",
-        "<i>Віртуальний облік. Реальні накази не надсилались.</i>",
-    ])
+    ]
+    # A setup the price never reached is neither a win nor a loss, but leaving it out
+    # silently would make a busy day look empty. One line, no R value, no percentage.
+    if cancelled:
+        lines += ["", f"Без входу: {cancelled} — ціна не зайшла в зону, угода не відкривалась."]
+    lines += ["", "<i>Віртуальний облік. Реальні накази не надсилались.</i>"]
+    return "\n".join(lines)
 
 
 def _dt(value) -> datetime | None:

@@ -80,14 +80,50 @@ def calendar_usable(calendar_ok: bool | None, stored_events: list[dict], news_en
 
 
 def _today_signals(store: Store, now: datetime) -> list[dict]:
+    """Signals created today that actually became a trade.
+
+    A signal the price never reached is not a trade and must not use up the daily
+    allowance. Live proof on 2026-11-25: 20261125-106B was cancelled at 09:20 with
+    "входу не було", and the bot then blocked the rest of the day with "Денний ліміт
+    сигналів 2 вичерпано" - after exactly one real trade. Half the limit was spent on
+    a setup that never opened.
+    """
+    return _today_signals_split(store, now)["traded"]
+
+
+def _today_signals_split(store: Store, now: datetime) -> dict:
+    """Today's traded signals, plus how many setups the price never reached.
+
+    One pass, two answers: the daily limit needs the traded list, the evening summary
+    also needs the count of setups that expired unfilled so a quiet day does not look
+    like an empty one.
+    """
     start, end, _ = day_bounds(now)
-    todays = []
+    traded: list[dict] = []
+    cancelled = 0
     for s in store.list_signals(limit=300):
         created = s.get("created_at")
         ts = datetime.fromisoformat(created.replace("Z", "+00:00")) if isinstance(created, str) else created
-        if ts and start <= ts.astimezone(timezone.utc) < end:
-            todays.append(s)
-    return todays
+        if not (ts and start <= ts.astimezone(timezone.utc) < end):
+            continue
+        if _never_filled(s):
+            cancelled += 1
+        else:
+            traded.append(s)
+    return {"traded": traded, "cancelled": cancelled}
+
+
+def _never_filled(s: dict) -> bool:
+    """True when the price never reached the zone, so no position ever existed.
+
+    Recognises both the current `exit_kind: NO_ENTRY` and the older wording that
+    predates it, because signals stored by 2.7.0 and earlier carry only the sentence.
+    """
+    res = s.get("resolution") or {}
+    if s.get("status") != "CANCELLED":
+        return False
+    return (str(res.get("exit_kind")) == "NO_ENTRY"
+            or "Вхід не активовано" in str(res.get("note") or ""))
 
 
 def run_scan(store: Store, *, send: bool = True) -> ScanResult:
@@ -371,12 +407,14 @@ def _scheduled_briefings(store: Store, snap: Snapshot, frames: dict, session, ri
         from api import stats_payload
 
         stats = stats_payload(store)
+        todays_all = _today_signals_split(store, now)
         text = notify.format_daily(
             day_key,
-            _today_signals(store, now),
+            todays_all["traded"],
             stats["equity"]["now"],
             ENV.risk.account_equity,
             ENV.risk.risk_percent,
+            cancelled=todays_all["cancelled"],
         )
         outcome, err = _send_once(store, f"daily:{day_key}", "daily", text, at=now)
         _tally(result, outcome, err)
