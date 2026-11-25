@@ -102,7 +102,8 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
     original_stop = float(signal["stop"])
     risk = abs(entry - original_stop)
     stop = original_stop
-    empty = {"event": None, "stop": stop, "best_r": 0.0, "kind": "SL", "moved": False}
+    empty = {"event": None, "stop": stop, "best_r": 0.0, "kind": "SL", "moved": False,
+             "filled": None}
     if risk <= 0:
         return empty
 
@@ -130,6 +131,12 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
 
     state = signal["status"]
     best_r = 0.0
+    # The moment the entry fills must be reported. Without this the signal sat at
+    # "READY" for its whole life: scan.py only saves when an event or a moved stop
+    # comes back, so a fill that was not immediately stopped out left the status
+    # untouched. The live signal 20261125-A8E4 filled, ran, and was stopped out -
+    # and Telegram never said "вхід виконано", while the card still read "готовий".
+    entry_event = None
 
     def clock(bar: Candle) -> datetime:
         """Decision time for a bar: its close, or the scan clock if that is later.
@@ -162,6 +169,12 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                             "stop": stop, "best_r": best_r, "kind": "SL", "moved": False}
                 continue
             state = "ACTIVE"
+            fill = signal["entry_high"] if is_buy else signal["entry_low"]
+            entry_event = {
+                "status": "ACTIVE", "price": fill, "ts": c.t + 300,
+                "note": f"Вхід виконано на {fill:.5f} — угода відкрита.",
+                "exit_kind": None, "r_at_exit": 0.0,
+            }
 
         # Time limit is checked before the stop on the same bar, so a trade that has
         # run out of time is closed at the bar it expired on instead of being carried
@@ -171,7 +184,8 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                               "note": f"Максимальний час утримання {max_hold} хв вичерпано.",
                               "exit_kind": "TIME", "r_at_exit": round(to_r(c.c), 2)},
                     "stop": stop, "best_r": best_r,
-                    "kind": _exit_kind(stop, entry, original_stop), "moved": stop != original_stop}
+                    "kind": _exit_kind(stop, entry, original_stop),
+                    "moved": stop != original_stop, "filled": entry_event}
 
         # Stop is judged before anything else on the bar, so a spike that runs to
         # +2R and collapses back is still an ordinary loss at the stop it opened with.
@@ -197,6 +211,7 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                 "event": {"status": "SL_HIT", "price": stop, "ts": c.t, "note": note,
                           "exit_kind": kind, "r_at_exit": round(to_r(stop), 2)},
                 "stop": stop, "best_r": best_r, "kind": kind, "moved": True,
+                "filled": entry_event,
             }
 
         # Reference targets. They are reported, never acted on: closing at TP1 scored
@@ -228,7 +243,8 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                         stop = clamped if clamped < stop - 1e-9 else stop
 
     return {"event": None, "stop": stop, "best_r": best_r,
-            "kind": _exit_kind(stop, entry, original_stop), "moved": stop != original_stop}
+            "kind": _exit_kind(stop, entry, original_stop), "moved": stop != original_stop,
+            "filled": entry_event}
 
 
 def advance(signal: dict, m5: list[Candle], now: datetime | None = None) -> dict | None:

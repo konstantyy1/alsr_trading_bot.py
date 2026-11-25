@@ -513,7 +513,7 @@
     return `<div class="ticket">
       <div class="ticket-top">
         <span class="side" style="color:${sideColor}">${esc(s.side)} · ${esc(s.setup)}</span>
-        <span class="grade">${esc(s.grade)} · score ${esc(s.score)}/100 · ${esc(s.status)}</span>
+        <span class="grade">${esc(s.grade)} · score ${esc(s.score)}/100 · ${esc(statusWord(s))}</span>
       </div>
       <div class="ticket-body">${cells.map(([k, v]) => `<div class="cell"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>
       <div class="ticket-foot">
@@ -528,6 +528,25 @@
     </div>`;
   }
 
+  // A cancelled signal is a raw code, not a sentence. On the live signal 20261124-1733
+  // it printed "CANCELLED" in the history, which says nothing about the fact that price
+  // never reached the entry zone and no trade was ever opened. Stored records from
+  // before 2.7.1 carry no exit_kind, so the note is checked as well.
+  function statusWord(s) {
+    const st = String(s.status || "");
+    const res = s.resolution || {};
+    const kind = String(res.exit_kind || "");
+    if (st === "CANCELLED") {
+      const noEntry = kind === "NO_ENTRY" || String(res.note || "").includes("Вхід не активовано");
+      return noEntry ? "⚪ входу не було" : "⚪ скасовано";
+    }
+    return ({
+      "READY": "🟡 готовий", "ACTIVE": "🔵 в угоді", "WATCHLIST": "👀 спостерігаю",
+      "TP1_HIT": "✅ TP1", "TP2_HIT": "✅ TP2", "TP3_HIT": "🎯 TP3",
+      "SL_HIT": "🛑 стоп", "EXPIRED": "⌛ прострочено", "UNDETERMINED": "❔ неясно",
+    })[st] || st;
+  }
+
   function renderSignals(payload) {
     const open = payload.open || [];
     $("openCount").textContent = `${open.length} відкрито · ліміт 3`;
@@ -539,15 +558,17 @@
     $("histCount").textContent = `${(payload.recent || []).length} у базі`;
     $("history").innerHTML = recent.length ? recent.map((s) => {
       const r = s.r_result;
-      const rTxt = r === null || r === undefined ? "" : ` · ${r > 0 ? "+" : ""}${r}R`;
-      const color = r > 0 ? "var(--jade)" : r < 0 ? "var(--red)" : "var(--muted)";
+      const rTxt = r === null || r === undefined || String(s.status) === "CANCELLED"
+        ? (String(s.status) === "CANCELLED" ? "—" : "")
+        : `${r > 0 ? "+" : ""}${r}R`;
+      const color = String(s.status) === "CANCELLED" ? "var(--muted)" : (r > 0 ? "var(--jade)" : r < 0 ? "var(--red)" : "var(--muted)");
       // Peak matters most on a zero result: "0R" alone hides that the trade was
       // +0.9R up before the break-even stop took it out. The peak is where it got.
       const peak = Number(s.best_r);
       const peakTxt = Number.isFinite(peak) && peak >= 0.75 ? ` · пік +${peak.toFixed(2)}R` : "";
       return `<div class="row">
         <span class="when">${esc(new Date(s.created_at).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}</span>
-        <span class="body"><b>${esc(s.side)} ${esc(s.grade)}</b> · ${esc(s.status)}
+        <span class="body"><b>${esc(s.side)} ${esc(s.grade)}</b> · ${esc(statusWord(s))}
           <span class="meta">${esc(s.id)} · score ${esc(s.score)} · ${esc(s.setup)}${esc(peakTxt)}</span></span>
         <span class="mono" style="color:${color}">${esc(rTxt)}</span>
       </div>`;

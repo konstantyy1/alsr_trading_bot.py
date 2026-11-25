@@ -351,8 +351,85 @@ def format_signal(sig: dict) -> str:
     return "\n".join(lines)
 
 
-def format_update(sig: dict, note: str) -> str:
-    """A state change on an open signal, short enough to read as a notification."""
+def fill_note(sig: dict) -> str:
+    """The message that says the trade now exists, and where the stop goes next.
+
+    Before this, a filled trade was never announced: the card stayed "готовий" in the
+    chat while the position was open, so the owner had to work out from the price alone
+    whether he was in. This is the one message worth sending immediately.
+
+    Plain text, no markup: format_update escapes the whole note as one string, so any
+    tag written here would reach the reader as "&lt;b&gt;".
+    """
+    side = str(sig.get("side", "")).upper()
+    is_buy = side == "BUY"
+    entry = _fill_of(sig)
+    stop = float(sig["stop"])
+    risk_pips = abs(entry - stop) / 0.0001
+    be_r = float(sig.get("break_even_at_r") or 0)
+    be_level = entry + (1 if is_buy else -1) * be_r * abs(entry - stop) if be_r > 0 else None
+    trail_r = sig.get("trail_start_r")
+    lines = [
+        f"Вхід виконано на {_f5(entry)} — угода відкрита.",
+        f"Стоп {_f5(stop)} · ризик {risk_pips:.1f} pips.",
+    ]
+    if be_level is not None:
+        lines.append(f"Коли ціна дійде до {_f5(be_level)} (+{be_r:.2f}R) — "
+                     f"переведи стоп на вхід {_f5(entry)} (беззбиток).")
+    if trail_r:
+        tp = entry + (1 if is_buy else -1) * float(trail_r) * abs(entry - stop)
+        lines.append(f"З {_f5(tp)} (+{float(trail_r):.1f}R) стоп рухається за ціною.")
+    tp1 = sig.get("tp1")
+    if tp1 is not None:
+        lines.append(f"TP1 {_f5(tp1)} — орієнтир, угоду не закриває.")
+    return "\n".join(lines)
+
+
+def stop_note(sig: dict, stop_now: float, kind: str) -> str:
+    """Tell the owner exactly what to do with the stop, in plain words.
+
+    "Пересунь стоп на 1.09385" is a price, not an instruction: on a SELL that number is
+    below the entry, and nothing said it was break-even rather than a loss. The kind is
+    known here, so say which of the three cases this is and what it protects.
+
+    Plain text, no markup - see fill_note for why.
+    """
+    is_buy = str(sig.get("side", "")).upper() == "BUY"
+    entry = _fill_of(sig)
+    risk = abs(entry - float(sig["stop"]))
+    r_now = ((stop_now - entry) if is_buy else (entry - stop_now)) / risk if risk > 0 else 0.0
+    best = float(sig.get("best_r") or 0)
+    if kind == "BE":
+        head = (f"Переведи стоп на беззбиток: {_f5(stop_now)}\n"
+                f"Ціна дійшла до +{float(sig.get('break_even_at_r') or 0.75):.2f}R. "
+                f"Стоп став на ціну входу — тепер угода не може дати збиток.")
+    else:
+        # The icon lives in the message headline, so it is not repeated here.
+        where = (f"стоп іде за нею на +{r_now:.2f}R"
+                 if r_now > 0.001 else "стоп іде за нею в бік прибутку")
+        head = (f"Пересунь стоп на {_f5(stop_now)}\n"
+                f"Трейлінг: ціна пройшла +{best:.2f}R, {where}.")
+    lines = [head]
+    if sig.get("tp1") is not None:
+        lines.append(f"TP1 {_f5(sig['tp1'])} — орієнтир, не команда закривати.")
+    lines.append("Стоп рухається тільки в бік прибутку і ніколи назад.")
+    return "\n".join(lines)
+
+
+def _fill_of(sig: dict) -> float:
+    """The price the position was opened at, as the lifecycle computes it."""
+    if sig.get("fill_price") is not None:
+        return float(sig["fill_price"])
+    return float(sig["entry_high"] if str(sig.get("side", "")).upper() == "BUY" else sig["entry_low"])
+
+
+def format_update(sig: dict, note: str, label: str | None = None) -> str:
+    """A state change on an open signal, short enough to read as a notification.
+
+    `label` replaces the status headline. A stop move is not a status change - the
+    trade is still ACTIVE - so without it every break-even and trailing message
+    opened with "вхід виконано", which reads as if the entry had just happened.
+    """
     r = sig.get("r_result")
     side = "🟢 BUY" if sig.get("side") == "BUY" else "🔴 SELL"
     status = str(sig.get("status", ""))
@@ -372,10 +449,18 @@ def format_update(sig: dict, note: str) -> str:
         icon = "➖ беззбиток"
     elif status == "SL_HIT" and str((sig.get("resolution") or {}).get("exit_kind")) == "TRAIL":
         icon = "✅ трейлінг закрив у плюс"
+    if label:
+        icon = label
 
     # A cancelled signal that never filled is not "cancelled for a reason" - it simply
     # never became a trade. Say that, because "скасовано" reads like a decision.
-    if status == "CANCELLED" and str((sig.get("resolution") or {}).get("exit_kind")) == "NO_ENTRY":
+    res_now = sig.get("resolution") or {}
+    if status == "CANCELLED" and (str(res_now.get("exit_kind")) == "NO_ENTRY"
+                                  # Signals stored before 2.7.1 carry no exit_kind and
+                                  # only this sentence in the note. Recognise them too,
+                                  # so the live trade 20261124-1733 reads correctly
+                                  # without rewriting its history in the database.
+                                  or "Вхід не активовано" in str(res_now.get("note") or "")):
         icon = "⚪ входу не було"
 
     r_line = ""
@@ -412,8 +497,10 @@ def format_update(sig: dict, note: str) -> str:
             plan.append("Ціна не зайшла в зону входу — сигнал згорів, нічого не відкривалось.")
     elif status == "ACTIVE" and sig.get("trail_start_r") is not None:
         # Direction-neutral on purpose: for a SELL the stop travels downwards, so any
-        # wording built on "above"/"below" would be wrong half the time.
-        plan.append("Стоп рухається за ціною в бік прибутку і ніколи не назад.")
+        # wording built on "above"/"below" would be wrong half the time. Skipped when
+        # the note already explains the stop, otherwise the same sentence arrives twice.
+        if "стоп" not in note.lower():
+            plan.append("Стоп рухається за ціною в бік прибутку і ніколи не назад.")
 
     lines = [
         f"<b>{_esc(_pair(sig['symbol']))} {side}</b>",
@@ -425,7 +512,7 @@ def format_update(sig: dict, note: str) -> str:
         "",
         f"<sub>{warsaw_clock(_dt(sig['updated_at'] or sig['created_at']))} · <code>{sig['id']}</code></sub>",
     ]
-    return "\n".join([line for line in lines if line is not None])
+    return "\n".join([line for line in lines if line])
 
 
 def format_now(snap, frames, session, news) -> str:

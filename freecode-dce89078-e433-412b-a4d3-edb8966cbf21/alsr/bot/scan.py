@@ -17,6 +17,13 @@ from config import ENV, PIP, SYMBOL, chat_id, telegram_ready
 # Smallest stop move worth a Telegram message. A fifth of the median trade risk
 # (~6.8 pips), so the number follows the market instead of being a fixed pip guess.
 TRAIL_NOTIFY_PIPS = 1.5
+
+# A setup that was just cancelled is not re-issued in the same direction within this
+# window and distance. Measured on the live pair 20261125-106B -> 20261125-A8E4: the
+# same SELL came back 4.8 pips away and 70 minutes after the alert, 10 after the
+# cancellation, right after the owner was told the first one never filled.
+DUPLICATE_COOLDOWN_MIN = 120
+DUPLICATE_COOLDOWN_PIPS = 8.0
 from datafeed import Snapshot, build_snapshot
 from lifecycle import OPEN_STATUSES, apply, evaluate_signal
 from markettime import day_bounds, news_risk, session_info, utcnow
@@ -105,34 +112,8 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
             for sig in open_signals:
                 state_now = evaluate_signal(sig, snap.candles.get("M5", []), now)
                 event = state_now["event"]
-                if not event:
-                    # Persist a stop that has moved even while the trade is open.
-                    # Without this the dashboard and the Telegram message would keep
-                    # showing the original stop while the real one sits above entry.
-                    if state_now["moved"] and sig.get("trail_stop") != round(state_now["stop"], 5):
-                        moved = dict(sig)
-                        moved["trail_stop"] = round(state_now["stop"], 5)
-                        moved["best_r"] = round(state_now["best_r"], 2)
-                        moved["updated_at"] = now.isoformat()
-                        store.save_signal(moved)
-                        # Only speak when the stop moved far enough to matter. On 41
-                        # trades an unthrottled stream sent up to 9 messages for one
-                        # trade; at 1.5 pips (about a fifth of the median risk) the
-                        # worst trade sends 4 and the median sends 1, while every
-                        # move big enough to change the outcome is still announced.
-                        old_stop = sig.get("trail_stop") or sig["stop"]
-                        step_pips = abs(state_now["stop"] - float(old_stop)) / PIP
-                        if send and telegram_ready(store) and step_pips >= TRAIL_NOTIFY_PIPS:
-                            outcome, err = _send_once(
-                                store,
-                                f"trail:{moved['id']}:{moved['trail_stop']}",
-                                "signal_update",
-                                notify.format_update(
-                                    {**moved, "resolution": {"exit_kind": state_now["kind"]}},
-                                    f"Пересунь стоп на {state_now['stop']:.5f}.",                                ),
-                                moved["id"],
-                            )
-                            _tally(result, outcome, err)
+                if event is None:
+                    _advance_open(sig, state_now, store, now, result, send)
                     continue
                 updated = apply(sig, event, now)
                 updated["trail_stop"] = round(event["price"], 5)
@@ -140,6 +121,22 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
                 store.save_signal(updated)
                 result.updates.append(updated["id"])
                 if send and telegram_ready(store):
+                    # A close that happened on the same bar as the fill must still say
+                    # the trade was opened: otherwise the owner gets "стоп" for a
+                    # position he was never told existed. Two messages, fill first.
+                    filled = state_now.get("filled")
+                    if filled and sig.get("status") == "READY":
+                        opened = {**sig,
+                                  "status": "ACTIVE",
+                                  "filled_at": datetime.fromtimestamp(
+                                      filled["ts"], tz=timezone.utc).isoformat(),
+                                  "trail_stop": round(filled["price"], 5),
+                                  "updated_at": now.isoformat()}
+                        outcome, err = _send_once(
+                            store, f"fill:{sig['id']}", "signal_update",
+                            notify.format_update(opened, notify.fill_note(opened)), sig["id"],
+                        )
+                        _tally(result, outcome, err)
                     outcome, err = _send_once(
                         store,
                         f"update:{updated['id']}:{updated['status']}",
@@ -248,16 +245,22 @@ def run_scan(store: Store, *, send: bool = True) -> ScanResult:
             if decision.verdict == "SIGNAL" and decision.candidate and ENV.enable_signals:
                 if store.state().get("paused"):
                     result.details.append("Сигнали призупинено командою /pause.")
-                elif _duplicate(decision.candidate, open_now):
-                    result.details.append("Схожий сценарій уже відкритий — повтор не надсилаємо.")
                 else:
-                    sig = build_signal(decision.candidate, snap, session, ENV.risk, now, SYMBOL, risk)
-                    store.save_signal(sig)          # persist BEFORE sending
-                    result.created.append(sig["id"])
-                    if send and telegram_ready(store):
-                        outcome, err = _send_once(store, f"signal:{sig['id']}:READY", "signal_new", notify.format_signal(sig), sig["id"])
-                        _tally(result, outcome, err)
-                    store.log("info", "signal", f"Створено {sig['id']} {sig['side']} {sig['grade']} score={sig['score']}")
+                    # A cancelled setup is not "open", so it is passed separately:
+                    # without it the bot re-issued the same idea minutes after
+                    # telling the owner it was off (106B -> A8E4 on 2026-11-25).
+                    dupe = _duplicate(decision.candidate, open_now,
+                                      store.list_signals(limit=12), now)
+                    if dupe:
+                        result.details.append(dupe)
+                    else:
+                        sig = build_signal(decision.candidate, snap, session, ENV.risk, now, SYMBOL, risk)
+                        store.save_signal(sig)          # persist BEFORE sending
+                        result.created.append(sig["id"])
+                        if send and telegram_ready(store):
+                            outcome, err = _send_once(store, f"signal:{sig['id']}:READY", "signal_new", notify.format_signal(sig), sig["id"])
+                            _tally(result, outcome, err)
+                        store.log("info", "signal", f"Створено {sig['id']} {sig['side']} {sig['grade']} score={sig['score']}")
 
             # 5) Scheduled messages, then commands. Both are idempotent: each
             # notification is claimed by a date key and each command by update id.
@@ -402,13 +405,127 @@ def _scheduled_briefings(store: Store, snap: Snapshot, frames: dict, session, ri
                 sent_any = True
 
 
-def _duplicate(candidate, open_signals: list[dict]) -> bool:
+def _duplicate(candidate, open_signals: list[dict],
+               recent_signals: list[dict] | None = None,
+               now: datetime | None = None) -> str | None:
+    """Why this setup must not become a new signal, or None when it is fresh.
+
+    Two separate checks, because they catch different mistakes:
+
+    * An open setup in the same direction within 5 pips is the same trade twice.
+    * A *cancelled* setup is the case that actually happened: 20261125-106B (SELL
+      1.09433) expired at 09:20 because price never came back, and ten minutes later
+      the bot issued 20261125-A8E4 (SELL 1.09385) - the same idea, 4.8 pips away,
+      right after telling the owner the first one was off. Re-issuing it looks like a
+      contradiction and doubles the risk on one market move, so a cancelled setup is
+      given a cooldown before the same direction may speak again.
+    """
     for s in open_signals:
-        if s["side"] != candidate.side:
+        if s.get("side") != candidate.side:
             continue
         if abs(float(s["trigger"]) - candidate.trigger) / PIP < 5:
-            return True
-    return False
+            return "схожий сценарій уже відкритий — повтор не надсилаємо"
+
+    if not recent_signals or now is None:
+        return None
+    for s in recent_signals:
+        if s.get("side") != candidate.side:
+            continue
+        if str(s.get("status")) != "CANCELLED":
+            continue
+        if abs(float(s["trigger"]) - candidate.trigger) / PIP >= DUPLICATE_COOLDOWN_PIPS:
+            continue
+        created = s.get("created_at")
+        try:
+            since = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if (now - since) < timedelta(minutes=DUPLICATE_COOLDOWN_MIN):
+            return (f"той самий сетап щойно скасовано ({s.get('id')}) — "
+                    f"чекаємо {DUPLICATE_COOLDOWN_MIN} хв, щоб не видавати його вдруге")
+    return None
+
+
+def _advance_open(sig: dict, state_now: dict, store: Store, now: datetime,
+                  result: ScanResult, send: bool) -> None:
+    """An open signal that has not closed: record the fill, and keep the stop current.
+
+    Three things were missing here, and all three were visible on live trades:
+
+    1. The fill was never saved. A trade whose stop had not yet moved stayed at
+       "READY" forever - the dashboard said "готовий" while the position was open -
+       and Telegram never announced "вхід виконано" (signal 20261125-A8E4).
+    2. Break-even was silent. The stop jumped to entry at +0.75R and nothing was sent,
+       so the owner had to move it by hand without being told (same signal: the stop
+       went 1.09463 -> 1.09385 and no message arrived).
+    3. The trailing message carried a raw status code and no plan, because it passed
+       only "resolution" while format_update reads "status".
+    """
+    patch: dict = {}
+    stop_now = round(state_now["stop"], 5)
+    if state_now["moved"] and sig.get("trail_stop") != stop_now:
+        patch["trail_stop"] = stop_now
+    best = round(state_now["best_r"], 2)
+    if sig.get("best_r") != best:
+        patch["best_r"] = best
+
+    filled = state_now.get("filled")
+    is_new_fill = bool(filled) and sig.get("status") == "READY"
+
+    if is_new_fill:
+        patch["status"] = "ACTIVE"
+        patch["filled_at"] = datetime.fromtimestamp(filled["ts"], tz=timezone.utc).isoformat()
+    if not patch:
+        return
+    patch["updated_at"] = now.isoformat()
+    updated = {**sig, **patch}
+    store.save_signal(updated)
+    result.updates.append(sig["id"])
+
+    if not (send and telegram_ready(store)):
+        return
+
+    if is_new_fill:
+        # The one message the owner acts on before anything else: the trade exists.
+        # It shows the stop the trade was opened with, not one already moved on the
+        # same bar - the card would read "стоп 1.09385" while the text says "Стоп
+        # 1.09463", which is two different numbers for one trade.
+        outcome, err = _send_once(
+            store, f"fill:{sig['id']}", "signal_update",
+            notify.format_update({**updated, "trail_stop": updated["stop"]},
+                                 notify.fill_note(updated)),
+            sig["id"],
+        )
+        _tally(result, outcome, err)
+        # No early return: a fast move can fill the trade and reach break-even inside
+        # the same scan. Returning here swallowed the break-even instruction - the
+        # stop was saved at entry and the owner was never told to move it.
+        if "trail_stop" not in patch:
+            return
+    old_stop = sig.get("trail_stop") or sig["stop"]
+    step_pips = abs(patch["trail_stop"] - float(old_stop)) / PIP
+    # Break-even is the exception to the distance filter: the owner must move the
+    # stop even if the step looks small, because the trade stops losing money there.
+    kind = state_now["kind"]
+    if step_pips < TRAIL_NOTIFY_PIPS and kind != "BE":
+        return
+    outcome, err = _send_once(
+        store,
+        f"trail:{sig['id']}:{patch['trail_stop']}",
+        "signal_update",
+        notify.format_update(
+            {**updated, "status": "ACTIVE"},
+            notify.stop_note(updated, patch["trail_stop"], kind),
+            # The headline must name the action, not repeat "вхід виконано": the trade
+            # is still open, and saying the entry just happened on a +4R trailing
+            # message is wrong twice over.
+            label="➖ беззбиток" if kind == "BE" else "📈 трейлінг стопу",
+        ),
+        sig["id"],
+    )
+    _tally(result, outcome, err)
 
 
 def _tally(result: ScanResult, outcome: str, err: str | None) -> None:

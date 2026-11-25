@@ -14,9 +14,11 @@ from datetime import datetime, timedelta, timezone
 from analysis import day_week_levels
 from config import ENV, PIP, Risk
 from datafeed import Candle, aggregate, validate_candles
-from lifecycle import advance
+from lifecycle import advance, evaluate_signal
 from markettime import LON, NY, WAW, market_closed, news_risk, session_info
+import notify
 from notify import format_signal
+from signals import Candidate
 
 UTC = timezone.utc
 
@@ -494,26 +496,36 @@ def test_stop_move_message_is_actionable() -> tuple[bool, str]:
 
     "Стоп зараз: 1.10050" is a fact, not an instruction: on a phone it still needs the
     order. So the message carries the exact price to enter and how far it moved, for
-    both BUY and SELL. A missing price here means the owner has to work it out himself.
+    both BUY and SELL, and it goes through the same stop_note() the scanner uses -
+    checking a hand-written note would test nothing but the test.
     """
-    from notify import format_update
+    from notify import format_update, stop_note
 
     now = datetime(2026, 11, 24, 10, 0, tzinfo=UTC)
     base = _signal(status="ACTIVE", created_at=now.isoformat(), updated_at=now.isoformat(),
                    entry_low=1.0995, entry_high=1.1005, stop=1.0985,
                    break_even_at_r=0.75, trail_start_r=1.5, trail_atr_mult=1.0,
-                   trail_min_pips=1.5, trail_stop=1.1005)
-    buy = format_update(base, "Пересунь стоп на 1.10050.")
+                   trail_min_pips=1.5, trail_stop=1.1005, best_r=1.5)
+    buy = format_update(base, stop_note(base, 1.1005, "TRAIL"), label="📈 трейлінг стопу")
     sell_sig = dict(base, side="SELL", stop=1.1025, trail_stop=1.1005,
                     entry_low=1.0995, entry_high=1.1005)
-    sell = format_update(sell_sig, "Пересунь стоп на 1.10050.")
+    sell = format_update(sell_sig, stop_note(sell_sig, 1.1005, "TRAIL"), label="📈 трейлінг стопу")
+    # Break-even is a different instruction and must say so, not just name a price.
+    be = format_update(dict(base, trail_stop=1.1005), stop_note(base, 1.1005, "BE"),
+                       label="➖ беззбиток")
 
     ok_buy = "Пересунь стоп на 1.10050" in buy and "20.0 pips" in buy
     ok_sell = "Пересунь стоп на 1.10050" in sell and "20.0 pips" in sell
     # The old wording was direction-specific and wrong for a SELL.
-    neutral = "ніколи не назад" in buy and "ніколи не назад" in sell
-    ok = ok_buy and ok_sell and neutral
-    return ok, f"BUY={ok_buy}, SELL={ok_sell}, нейтральне формулювання={neutral}"
+    neutral = "ніколи назад" in buy and "ніколи назад" in sell
+    # A stop move is not a fill: the headline must name the action, not the entry.
+    headline = buy.split("\n")[1]
+    ok_be = ("беззбиток" in be.lower() and "1.10050" in be
+             and "вхід виконано" not in be and "вхід виконано" not in buy
+             and "трейлінг" in headline.lower() and "беззбиток" in be.split("\n")[1].lower())
+    ok = ok_buy and ok_sell and neutral and ok_be
+    return ok, (f"BUY={ok_buy}, SELL={ok_sell}, нейтральне формулювання={neutral}, "
+                f"беззбиток={ok_be}")
 
 
 def test_stop_moves_are_not_spammy() -> tuple[bool, str]:
@@ -714,6 +726,85 @@ def test_entry_wait_covers_real_fills() -> tuple[bool, str]:
     return fits_most and not_forever, (f"вікно входу {ENTRY_WAIT_MIN} хв — "
                                        f"покриває найповільніший вхід (50), "
                                        f"але сигнал усе ще згорає")
+
+
+def test_fill_is_announced() -> tuple[bool, str]:
+    """A filled entry must produce an event, a saved ACTIVE status and a message.
+
+    Live case 20261125-A8E4: the SELL filled, ran, and was stopped out, and Telegram
+    never said "вхід виконано" - the card stayed "готовий · рейтинг A+" while the
+    position was open. The cause was that evaluate_signal returned no event for a
+    plain fill, so scan.py had nothing to save and nothing to send.
+    """
+    sig = _signal()
+    bar = _c(T0, 1.1000, 1.1006, 1.0999, 1.1002)     # dips into the buy zone
+    state = evaluate_signal(sig, [bar], datetime(2026, 11, 23, 10, 10, tzinfo=UTC))
+    filled = state.get("filled")
+    ok = (state["event"] is None and filled is not None
+          and filled["status"] == "ACTIVE" and filled["price"] == 1.1005)
+    return ok, f"подія входу={filled['status'] if filled else None}, ціна={(filled or {}).get('price')}"
+
+
+def test_same_bar_fill_and_stop_is_announced() -> tuple[bool, str]:
+    """A fill and a stop on one bar must still announce the entry first.
+
+    M5 cannot know whether the entry or the stop came first inside the bar, so the
+    stop is booked - but a bare "стоп" for a position the owner was never told existed
+    is worse than useless. Both lifecycles paths that close a trade now carry the
+    fill, so scan.py can send "вхід виконано" and then the close.
+    """
+    sig = _signal()
+    # BUY zone 1.0995-1.1005, stop 1.0985. One bar dips into the zone and then
+    # collapses through the stop: entry and exit in the same 5 minutes.
+    bar = _c(T0, 1.1006, 1.1008, 1.0980, 1.0982)
+    state = evaluate_signal(sig, [bar], datetime(2026, 11, 23, 10, 10, tzinfo=UTC))
+    filled = state.get("filled")
+    ok = (state["event"] is not None and state["event"]["status"] == "SL_HIT"
+          and filled is not None and filled["price"] == 1.1005)
+    return ok, f"подія={(state['event'] or {}).get('status')}, вхід={(filled or {}).get('price')}"
+
+
+def test_break_even_is_announced() -> tuple[bool, str]:
+    """Break-even must send a message even when the step is smaller than the trail filter.
+
+    The stop moves from the original level to the entry and the trade stops losing
+    money there. On A8E4 that move was 7.8 pips and produced nothing at all, so the
+    owner had to notice +0.75R himself. Break-even is exempt from the pip threshold.
+    """
+    sig = _signal(status="ACTIVE")
+    # BUY: entry 1.1005, stop 1.0985, risk 20 pips. +0.75R is 1.1020, so the bar has
+    # to trade through it - a high of 1.1018 is only +0.65R and leaves the stop alone.
+    bars = [_c(T0, 1.1005, 1.1026, 1.1004, 1.1024)]
+    state = evaluate_signal(sig, bars, datetime(2026, 11, 23, 10, 10, tzinfo=UTC))
+    note = notify.stop_note({**sig, "best_r": state["best_r"]}, state["stop"], state["kind"])
+    ok = (state["kind"] == "BE" and abs(state["stop"] - 1.1005) < 1e-9
+          and "беззбиток" in note.lower())
+    return ok, f"стоп={round(state['stop'], 5)}, kind={state['kind']}, текст містить 'беззбиток'"
+
+
+def test_cancelled_setup_is_not_reissued() -> tuple[bool, str]:
+    """The same setup must not come back minutes after it was cancelled.
+
+    Live pair: 20261125-106B (SELL 1.09433) expired at 09:20 because price never
+    returned, and at 09:30 the bot issued 20261125-A8E4 (SELL 1.09385) - the same
+    idea, 4.8 pips away, ten minutes after saying the first one was off.
+    """
+    from scan import _duplicate
+
+    now = datetime(2026, 11, 25, 9, 30, tzinfo=UTC)
+    cancelled = {"side": "SELL", "trigger": 1.09433, "status": "CANCELLED",
+                 "id": "106B", "created_at": "2026-11-25T08:20:25+00:00"}
+    cand = Candidate(side="SELL", setup="FVG", entry_low=1.09385, entry_high=1.09445,
+                     trigger=1.09385, stop=1.09463, tp1=1.09176, tp2=1.09108, tp3=None,
+                     rr=2.0, risk_pips=7.8, reward_pips=20.9, expected_hold_min=60,
+                     max_hold_min=210, grade="A+", score=96, context={}, why=[],
+                     cancel_rules=[], invalidations=[])
+    blocked = _duplicate(cand, [], [cancelled], now)
+    # ...and after the cooldown the same setup is allowed again.
+    later = now + timedelta(minutes=180)
+    allowed = _duplicate(cand, [], [cancelled], later)
+    ok = blocked is not None and allowed is None
+    return ok, f"через 70 хв={bool(blocked)}, через 3 год={bool(allowed)}"
 
 
 def test_signal_template() -> tuple[bool, str]:
@@ -1345,6 +1436,10 @@ TESTS = [
     ("Entry wait covers real fills", test_entry_wait_covers_real_fills),
     ("Card says it is a limit order", test_card_says_it_is_a_limit_order),
     ("Manual fill reports real risk", test_manual_fill_reports_real_risk),
+    ("Fill is announced", test_fill_is_announced),
+    ("Fill and stop on one bar", test_same_bar_fill_and_stop_is_announced),
+    ("Break-even is announced", test_break_even_is_announced),
+    ("Cancelled setup is not reissued", test_cancelled_setup_is_not_reissued),
     ("Ticker rendered as pair", test_pair_label),
 ]
 
