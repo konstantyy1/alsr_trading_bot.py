@@ -125,7 +125,12 @@ def detect_setups(snap: Snapshot, frames: dict[str, Frame], levels: list[Zone], 
     out: list[Candidate] = []
     last, prev = m5[-1], m5[-2]
     recent = m5[-12:]
-    prior = recent[:-1]
+    # `prev` is the bar that does the sweeping, `last` is the reclaim bar that
+    # follows it, so the "prior range" must end before `prev`. It used to be
+    # recent[:-1], which still contains `prev` itself - and a bar can never be
+    # below the minimum of a range it belongs to, so the sweep test was dead
+    # code for every bar in every backtest. Found in 2.7.8.
+    prior = recent[:-2]
 
     # 1) Liquidity sweep + reclaim on M5, aligned with M15.
     if prior:

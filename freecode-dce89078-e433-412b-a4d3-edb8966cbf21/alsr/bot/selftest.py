@@ -209,6 +209,45 @@ def test_lifecycle_late_scan_still_fills() -> tuple[bool, str]:
                 f"подія={stale['event']['status'] if stale['event'] else 'немає'}")
 
 
+def test_liquidity_sweep_can_ever_fire() -> tuple[bool, str]:
+    """A sweep must be compared with the bars BEFORE it, not with itself.
+
+    Real defect found in 2.7.8: `prior = recent[:-1]` still contained `prev`, the bar
+    that does the sweeping, so `prev.l < min(c.l for c in prior)` compared a bar with a
+    range that included it. That is never true, in any market, so LIQUIDITY_SWEEP_MSS
+    produced zero candidates in all 59 days of the replay while looking healthy in the
+    journal - it simply never appeared. With the range ending before `prev`, the same
+    bars yield one BUY candidate.
+    """
+    import signals as sig_mod
+    from analysis import analyse
+    from datafeed import Quality, Quote, Snapshot
+
+    now = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    ts = int(now.timestamp())
+
+    # Quiet 1.0990-1.1000 range, then a bar that takes the low and closes back inside,
+    # then a reclaim bar that closes above the sweep bar's high.
+    m5 = [_c(ts - (60 - i) * 300, 1.0995, 1.1000, 1.0990, 1.0994) for i in range(60)]
+    m5[-2] = _c(ts - 600, 1.0994, 1.0996, 1.0986, 1.0992)
+    m5[-1] = _c(ts - 300, 1.0992, 1.1002, 1.0990, 1.1000)
+    m15 = [_c(ts - (40 - i) * 900, 1.0992, 1.1004, 1.0988, 1.0995) for i in range(40)]
+
+    quote = Quote(bid=1.0999, ask=1.1001, mid=1.1000, spread_pips=1.2, ts=now,
+                  provider="test", live=True, spread_is_assumed=True)
+    snap = Snapshot(quote=quote, candles={"M5": m5, "M15": m15},
+                    quality=Quality(True, "VERIFIED"), validator=None, generated_at=now)
+    frames = {tf: analyse(tf, m5 if tf == "M5" else m15) for tf in ("M5", "M15")}
+    frames["H1"] = analyse("H1", m15)
+    frames["H4"] = analyse("H4", m15)
+
+    found = sig_mod.detect_setups(snap, frames, [], 5.0, 35.0)
+    sweeps = [c for c in found if c.setup == "LIQUIDITY_SWEEP_MSS"]
+    ok = len(sweeps) == 1 and sweeps[0].side == "BUY" and sweeps[0].risk_pips > 0
+    return ok, (f"знайдено сетапів {len(found)}, із них sweep {len(sweeps)}"
+                + (f" ({sweeps[0].side}, {sweeps[0].risk_pips} pips)" if sweeps else ""))
+
+
 def test_lifecycle_cancel() -> tuple[bool, str]:
     # The entry window is ENTRY_WAIT_MIN (60), so a scan at exactly 60 minutes must
     # still be waiting; a little later the signal is closed as never filled.
@@ -1658,6 +1697,7 @@ TESTS = [
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),
     ("Lifecycle: cancel when entry not triggered", test_lifecycle_cancel),
     ("Lifecycle: late scan still honours a touched entry", test_lifecycle_late_scan_still_fills),
+    ("Setups: liquidity sweep compares against earlier bars", test_liquidity_sweep_can_ever_fire),
     ("Lifecycle: max hold expiry", test_lifecycle_expiry),
     ("Lifecycle: ignore open bar", test_lifecycle_ignores_incomplete_bar),
     ("H4 aggregation", test_h4_aggregation),
