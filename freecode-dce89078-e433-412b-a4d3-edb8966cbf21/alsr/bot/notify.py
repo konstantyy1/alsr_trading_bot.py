@@ -384,7 +384,6 @@ def fill_note(sig: dict) -> str:
         lines.append(f"TP1 {_f5(tp1)} — орієнтир, угоду не закриває.")
     return "\n".join(lines)
 
-
 def stop_note(sig: dict, stop_now: float, kind: str) -> str:
     """Tell the owner exactly what to do with the stop, in plain words.
 
@@ -410,8 +409,11 @@ def stop_note(sig: dict, stop_now: float, kind: str) -> str:
         head = (f"Пересунь стоп на {_f5(stop_now)}\n"
                 f"Трейлінг: ціна пройшла +{best:.2f}R, {where}.")
     lines = [head]
-    if sig.get("tp1") is not None:
-        lines.append(f"TP1 {_f5(sig['tp1'])} — орієнтир, не команда закривати.")
+    # No TP line here on purpose. Since 2.7.0 a target cannot close the trade, and the
+    # owner is mid-position being told where to move the stop - repeating "TP1 is only
+    # a reference" on every break-even and every trail step was pure noise. It read as
+    # if the bot still managed three targets. The signal card keeps one reference line,
+    # which is where it belongs.
     lines.append("Стоп рухається тільки в бік прибутку і ніколи назад.")
     return "\n".join(lines)
 

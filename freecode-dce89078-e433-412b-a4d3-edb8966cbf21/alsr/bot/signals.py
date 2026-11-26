@@ -411,6 +411,18 @@ def score_candidate(c: Candidate, frames: dict[str, Frame], snap: Snapshot, sess
     return parts
 
 
+def daily_slot_block(signals_today: int, risk: Risk) -> str | None:
+    """Return the block message when today's allowance is spent, else None.
+
+    Pulled out of evaluate() in 2.7.6 so the cap can be tested without building a
+    whole snapshot: the limit is the one rule whose tuning the owner controls, and a
+    check that only reads a number proves nothing about when it fires.
+    """
+    if signals_today >= risk.max_signals_per_day:
+        return f"Денний ліміт сигналів {risk.max_signals_per_day} вичерпано."
+    return None
+
+
 def evaluate(
     snap: Snapshot,
     frames: dict[str, Frame],
@@ -455,8 +467,8 @@ def evaluate(
         return stop("BLOCKED", f"Spread {snap.quote.spread_pips} pips перевищує ліміт {data_cfg.max_spread_pips}.")
     if open_count >= risk.max_open_setups:
         return stop("BLOCKED", f"Уже {open_count} активних сценарії(в) — ліміт {risk.max_open_setups}.")
-    if signals_today >= risk.max_signals_per_day:
-        return stop("BLOCKED", f"Денний ліміт сигналів {risk.max_signals_per_day} вичерпано.")
+    if (msg := daily_slot_block(signals_today, risk)) is not None:
+        return stop("BLOCKED", msg)
     if daily_r <= -risk.daily_loss_limit_r:
         return stop("BLOCKED", f"Денний ліміт збитку {risk.daily_loss_limit_r}R досягнуто.")
     if frames["M15"].atr / PIP > data_cfg.max_atr_m15_pips:
@@ -522,19 +534,10 @@ def build_signal(cand: Candidate, snap: Snapshot, session: SessionInfo, risk: Ri
     stop = cand.stop - widened / 2 if cand.side == "BUY" else cand.stop + widened / 2
     fill = entry_price(cand.side, cand.entry_low, cand.entry_high)
 
-    # TP1 is pushed slightly past the structural target. On 59 days the raw target
-    # scored +15.73R and the same target 10% further scored +17.76R, because price
-    # that reaches a visible level usually trades a little beyond it. The scale is
-    # measured, not guessed, and stays at 1.0 if the setting is changed.
+    # TP1 is the structural target and stays exactly where the setup found it. A
+    # TP1_SCALE offset was removed in 2.7.6: targets became reference levels in 2.7.0,
+    # so widening one changed no trade at all (1.0 / 1.1 / 1.2 measured identical).
     tp1 = cand.tp1
-    if risk.tp1_scale and risk.tp1_scale != 1.0:
-        raw_r = pips(fill, cand.tp1) / pips(fill, stop) if pips(fill, stop) > 0 else 0
-        shifted = fill + (pips(fill, stop) * raw_r * risk.tp1_scale) * (1 if cand.side == "BUY" else -1) * PIP
-        # Never move a target through TP2 — that would make the ladder inconsistent.
-        tp2_far = pips(fill, cand.tp2)
-        shifted_far = pips(fill, shifted)
-        if 0 < shifted_far < tp2_far:
-            tp1 = round(shifted, 5)
 
     risk_pips = pips(fill, stop)
     reward_pips = pips(fill, tp1)

@@ -431,6 +431,51 @@ def test_trailing_waits_for_its_start() -> tuple[bool, str]:
     return at_be, f"стоп {out['stop']:.5f} (вхід {entry:.5f}) — беззбиток, без трейлу"
 
 
+def test_trail_waits_until_two_r() -> tuple[bool, str]:
+    """On the shipped rule the stop must not trail before +2.0R.
+
+    2.7.6 moved the start level from +1.5R to +2.0R because at +1.5R the trade has
+    not proved itself yet and the trail was capping runaways just as they began. The
+    test is driven by the live Risk() defaults, not by a hand-typed number, so a
+    quiet drift back to an earlier start level shows up here as a failure instead of
+    only in a backtest nobody re-runs.
+    """
+    risk = Risk()
+    start = float(risk.trail_start_r)
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    t0 = int(created.timestamp())
+    sig = _signal(status="ACTIVE", created_at=created.isoformat(),
+                  break_even_at_r=risk.break_even_at_r, trail_start_r=start,
+                  trail_atr_mult=risk.trail_atr_mult, trail_min_pips=risk.trail_min_pips,
+                  max_hold_min=600)
+    entry = 1.1005            # entry_high
+    step = 0.0004             # +0.2R per bar (risk = 20 pips)
+    per_bar = step / (entry - 1.0985)
+
+    bars = []
+    for i in range(1, int(start / per_bar) + 3):
+        price = entry + i * step
+        bars.append(_c(t0 + i * 300, price - 0.0002, price + 0.0002, price - 0.0002, price))
+
+    # Between break-even and the start level the stop sits exactly at the entry.
+    be = float(risk.break_even_at_r)
+    before = []
+    for k in range(1, len(bars) + 1):
+        out = evaluate_signal(sig, bars[:k], bars[k - 1].t + 300)
+        if be <= out["best_r"] < start:
+            before.append(round(out["stop"], 6))
+    held = bool(before) and all(abs(s - entry) < 1e-9 for s in before)
+
+    # The first bar at or past the start level must lift the stop above entry.
+    out = evaluate_signal(sig, bars, bars[-1].t + 300)
+    lifted = out["stop"] > entry + 1e-9 and out["best_r"] >= start
+
+    ok = held and lifted
+    return ok, (f"правило +{start}R: між беззбитком і стартом стоп на вході={held} "
+                f"({len(before)} барів), далі піднявся={lifted} ({out['stop']:.5f})")
+
+
 def test_trail_min_gap_beats_spread() -> tuple[bool, str]:
     """The trailing gap can never be placed inside the spread.
 
@@ -486,7 +531,7 @@ def test_trailing_matches_backtest() -> tuple[bool, str]:
     """
     risk = Risk()
     got = (risk.break_even_at_r, risk.trail_start_r, risk.trail_atr_mult, risk.trail_min_pips)
-    want = (0.75, 1.5, 1.0, 1.5)
+    want = (0.75, 2.0, 0.75, 1.5)
     ok = all(abs(float(a) - float(b)) < 1e-9 for a, b in zip(got, want))
     return ok, f"беззбиток {got[0]}R, трейл {got[2]}×ATR від +{got[1]}R, мін {got[3]} pips"
 
@@ -544,6 +589,95 @@ def test_stop_moves_are_not_spammy() -> tuple[bool, str]:
     sensible = 0.1 <= share <= 0.35       # a fifth of one trade's risk, not a tick
     return sensible, (f"поріг {TRAIL_NOTIFY_PIPS} pips = {share*100:.0f}% ризику "
                       f"({r.trail_atr_mult}×ATR)")
+
+
+def test_loss_is_exactly_one_r() -> tuple[bool, str]:
+    """A stop-out must cost exactly 1R and break-even exactly 0R. No fractions.
+
+    The owner read the backtest and asked the right question: where do -1.18R and
+    -0.20R losses come from, when a stop should be simply -1R and a break-even zero?
+
+    They came from the backtest charging the whole spread a second time on top of a
+    result that was already measured in R. R is an account unit, not a price move:
+    the position is sized from the stop distance, so a stop-out costs 1R of the
+    account by construction. The live bot always reported a clean -1.00R; only the
+    backtest disagreed, which means every number quoted from it was wrong.
+
+    This test pins the arithmetic in lifecycle, so a future "cost" deduction cannot
+    quietly smuggle fractions back into the record.
+    """
+    from lifecycle import net_r
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    entry, stop = 1.1005, 1.0985
+    risk = abs(entry - stop)
+
+    cases = []
+    # BUY fills at the upper edge of its zone; SELL fills at the lower edge, and its
+    # stop sits above the entry. Both must land on exactly -1.00R and 0.00R.
+    for side, stop_price in (("BUY", stop), ("SELL", entry + risk)):
+        sig = _signal(side=side, status="ACTIVE", created_at=created.isoformat(),
+                      stop=round(stop_price, 5), entry_low=1.0995, entry_high=1.1005,
+                      spread_at_creation=1.2, break_even_at_r=0.75, trail_start_r=2.0,
+                      trail_atr_mult=0.75, trail_min_pips=1.5, max_hold_min=240)
+        fill = 1.1005 if side == "BUY" else 1.0995
+        cases.append((side, "стоп", net_r(sig, round(stop_price, 5))))
+        cases.append((side, "беззбиток", net_r(sig, fill)))
+
+    losses = [v for _, name, v in cases if name == "стоп"]
+    flats = [v for _, name, v in cases if name == "беззбиток"]
+    # A winner must still pay the spread: +2.00R gross is not +2.00R net.
+    won = _signal(status="ACTIVE", created_at=created.isoformat(), stop=stop,
+                  entry_low=1.0995, entry_high=1.1005, spread_at_creation=1.2)
+    win_net = net_r(won, entry + 2 * risk)
+    ok = (all(abs(v + 1.0) < 1e-9 for v in losses)
+          and all(abs(v) < 1e-9 for v in flats)
+          and win_net < 2.0
+          and risk > 0)
+    return ok, (f"стоп {losses}, беззбиток {flats}, виграш +2.00R брутто → "
+                f"{win_net:+.2f}R нетто")
+
+
+def test_live_and_backtest_book_the_same_result() -> tuple[bool, str]:
+    """The journal and the replay must agree, because they used to disagree.
+
+    Until 2.7.6 the live bot booked a stop-out at exactly -1.00R while the backtest
+    booked -1.18R for the same trade, because the backtest deducted the spread a
+    second time. Two sources of truth for one result is how a system starts reporting
+    numbers nobody can reconcile, so both now call lifecycle.net_r().
+
+    The check runs the same signal through both paths and requires the same answer,
+    for a loser, a scratch and a winner.
+    """
+    import importlib.util
+    from pathlib import Path
+    from lifecycle import net_r
+
+    spec = importlib.util.spec_from_file_location(
+        "bt_agree", Path(__file__).resolve().parent.parent / "tools" / "backtest.py")
+    if spec is None:
+        return False, "не вдалось завантажити tools/backtest.py"
+    bt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bt)
+    src = Path(bt.__file__).read_text(encoding="utf-8")
+
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+    sig = _signal(status="ACTIVE", created_at=created.isoformat(), stop=1.0985,
+                  entry_low=1.0995, entry_high=1.1005, spread_at_creation=1.2,
+                  break_even_at_r=0.75, trail_start_r=2.0, trail_atr_mult=0.75,
+                  trail_min_pips=1.5, max_hold_min=240)
+
+    loss = net_r(sig, 1.0985)
+    scratch = net_r(sig, 1.1005)
+    win = net_r(sig, 1.1045)
+
+    # The replay must call the very same function; a hand-written spread subtraction
+    # in backtest.py is exactly the bug being pinned.
+    uses_same = 'net_r(open_signal' in src
+    exact = abs(loss + 1.0) < 1e-9 and abs(scratch) < 1e-9 and 0 < win < 2.0
+    ok = uses_same and exact
+    return ok, (f"бектест кличе net_r={uses_same}; збиток {loss:+.2f}, "
+                f"беззбиток {scratch:+.2f}, виграш +2.00R брутто → {win:+.2f}")
 
 
 def test_zero_result_trade_is_still_a_trade() -> tuple[bool, str]:
@@ -1034,6 +1168,28 @@ def test_backtest_thresholds_hold() -> tuple[bool, str]:
     return ok, f"поріг A={floor:g}, A+={plus:g}, максимум {risk.max_signals_per_day} на день"
 
 
+def test_daily_limit_is_three_and_blocks_the_fourth() -> tuple[bool, str]:
+    """Three real trades are allowed, the fourth setup is refused with that number.
+
+    Raised from 2 to 3 in 2.7.6 at the owner's request: on 59 days the same exit
+    rule made +15.13R at 35 trades and +15.58R at 40, so the second slot was cutting
+    real setups rather than noise. The cap still has to bind - without it the same
+    period offers 51 signals - so the check runs the gate itself, at 2, 3 and 4.
+    """
+    from config import Risk
+    from signals import daily_slot_block
+
+    risk = Risk()
+    got = [daily_slot_block(n, risk) for n in (0, 2, 3, 4)]
+    # 0 and 2 of 3 pass; 3 and 4 are refused, and the sentence names the cap.
+    ok = (got[0] is None and got[1] is None
+          and got[2] is not None and "3" in got[2]
+          and got[3] is not None and got[2] == got[3]
+          and risk.max_signals_per_day == 3)
+    return ok, (f"ліміт {risk.max_signals_per_day}: 2 угоди проходять, "
+                f"3-тя блокує — «{got[2]}»" if ok else f"ліміт {risk.max_signals_per_day}, ворота {got}")
+
+
 def test_score_is_not_winrate() -> tuple[bool, str]:
     text = format_signal(_signal())
     ok = "відповідність правилам, не ймовірність" in text
@@ -1484,12 +1640,15 @@ TESTS = [
     ("Break-even is applied", test_break_even_turns_loss_into_scratch),
     ("Trailing stop lifts and never falls", test_trailing_stop_lifts_and_never_falls),
     ("Trailing waits for its start level", test_trailing_waits_for_its_start),
+    ("Trailing starts only at +2.0R", test_trail_waits_until_two_r),
     ("Trailing gap beats the spread", test_trail_min_gap_beats_spread),
     ("Targets do not close the trade", test_improvement_is_not_a_target_hit),
     ("Live rule matches the backtest", test_trailing_matches_backtest),
     ("Stop move message is actionable", test_stop_move_message_is_actionable),
     ("Stop moves are not spammy", test_stop_moves_are_not_spammy),
     ("Zero result is still a trade", test_zero_result_trade_is_still_a_trade),
+    ("Loss is exactly 1R, break-even is 0R", test_loss_is_exactly_one_r),
+    ("Live and backtest book the same R", test_live_and_backtest_book_the_same_result),
     ("Old signal keeps its exit plan", test_old_signal_keeps_its_own_exit_plan),
     ("Legacy signal never trails", test_legacy_signal_never_trails),
     ("Exit rule wording is unambiguous", test_exit_rule_wording_is_unambiguous),
@@ -1503,6 +1662,7 @@ TESTS = [
     ("Break-even is announced", test_break_even_is_announced),
     ("Cancelled setup is not reissued", test_cancelled_setup_is_not_reissued),
     ("Cancelled signal keeps the daily slot", test_cancelled_signal_does_not_use_daily_limit),
+    ("Daily limit is three, not four", test_daily_limit_is_three_and_blocks_the_fourth),
     ("Ticker rendered as pair", test_pair_label),
 ]
 

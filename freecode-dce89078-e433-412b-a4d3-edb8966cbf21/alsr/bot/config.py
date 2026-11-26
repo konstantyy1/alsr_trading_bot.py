@@ -41,10 +41,15 @@ class Risk:
     min_score_ap_lus: float = _f("MIN_SCORE_A_PLUS", 92)
     cost_pips: float = _f("COST_PIPS", 1.2)
     account_equity: float = _f("ACCOUNT_EQUITY", 10000)
-    # The owner asked for 1-2 trades a day at the highest achievable hit rate, so the
-    # daily cap is set to 2: quality over quantity. The backtest average is 0.6/day,
-    # which means the cap rarely binds and only stops a clustered burst.
-    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 2)
+    # Raised from 2 to 3 in 2.7.6 at the owner's request, and confirmed AFTER the R
+    # accounting fix. On 59 days: 35 trades and +16.57R at a cap of 2, 40 trades and
+    # +19.41R at a cap of 3. On the last 30 days: +7.84R at 2 and +6.84R at 3, so the
+    # third slot is not uniformly better - it depends on whether the extra setups land
+    # in a trending stretch. It still binds: without a cap the same period offers 51
+    # signals, so this is a brake on a clustered day, not a target.
+    # The 1.5R daily loss stop keeps the downside in check: it already ends the day
+    # after two full losses, so a third setup only matters on a day that starts well.
+    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 3)
     # Backtest evidence for the default: over 30 days of real bars the Asia session
     # produced 20 trades and -13.11R, while every other session combined made +9.64R.
     # A 20,000-shuffle test put the chance of that being luck at 0.7%, and it held in
@@ -54,20 +59,39 @@ class Risk:
     #   TP1 10% further than the structural target: +0.132R per trade,
     #   5th percentile of the paired bootstrap +0.015 — real, not noise.
     #   Break-even once 0.75R is banked: losers stop turning into full -1R losses.
-    # Plain TP1 with a fixed stop scored +15.73R; these two together scored +20.74R
-    # and stayed positive in both halves and at 1.0/1.5/2.0 pips spread.
-    tp1_scale: float = _f("TP1_SCALE", 1.1)
+    #
+    # TP1_SCALE lived here until 2.7.6 and was removed: since 2.7.0 no target closes
+    # a trade, so shifting TP1 changed nothing at all. Measured 1.0 / 1.1 / 1.2 on the
+    # same bars - byte-identical results (+5.58R each). A setting that looks like it
+    # does something but cannot is worse than no setting.
     break_even_at_r: float = _f("BREAK_EVEN_AT_R", 0.75)
-    # Trailing stop since 2.7.0. Chosen by the worst-slice test, not by the highest
-    # total: 6 time slices x 3 spread levels on 59 days of EUR/USD M5, 41 trades.
-    #   +1.5R start / 1.0xATR  -> +22.60R, dd -2.57R, better in 15 of 18 slices
-    #   +1.5R start / 0.5R fixed -> +20.61R, dd -2.68R, better in 9 of 18
-    #   +2.0R start / 1.0xATR  -> +24.73R, dd -3.60R, deeper drawdown
-    # ATR beats a fixed distance because the median trailing gap lands at 0.42R
-    # (10th pct 0.29R, 90th 0.65R) and widens by itself in a volatile session.
-    # The floor keeps the gap above 1.5 pips so it can never sit inside the spread.
-    trail_start_r: float = _f("TRAIL_START_R", 1.5)
-    trail_atr_mult: float = _f("TRAIL_ATR_MULT", 1.0)
+    # Trailing stop since 2.7.0; start +2.0R and distance 0.75xATR since 2.7.6.
+    #
+    # Every number below was re-measured AFTER the R accounting was corrected
+    # (2.7.6). Until then the backtest charged the spread a second time on top of a
+    # result already expressed in R, which produced -1.18R stop-outs and -0.16R
+    # break-evens. Those figures invalidated every earlier comparison, so this is a
+    # fresh measurement on 59 days of real EUR/USD M5, 40 trades, with the live
+    # lifecycle doing the replay:
+    #
+    #   rule                total R   30 days   spread 2.0   thirds all up?
+    #   +1.5R / 1.0xATR     +16.79      -          -            no
+    #   +2.0R / 1.0xATR     +19.41    +6.84      +9.39          no
+    #   +2.0R / 0.75xATR    +21.07    +7.76     +10.47          no
+    #
+    # The third of the period in the middle is negative for every rule tried, so
+    # "all thirds positive" is not a bar any variant passes - it is a property of
+    # the sample, not a defect of one setting. The choice is made on the spread
+    # column instead: 0.75xATR keeps the most when trading costs double.
+    #
+    # Why 0.75xATR is now accepted, after being rejected in 2.7.0: the earlier
+    # rejection rested on numbers produced by the broken accounting, and the D13
+    # artefact it was likened to was a 1-pip trail. A median 0.75xATR gap is 7.5
+    # pips against a 1.2 pip spread, so a real stop order can sit there. The gain
+    # is also not one lucky trade: the largest is +4.11R and the total without it
+    # is still +16.96R.
+    trail_start_r: float = _f("TRAIL_START_R", 2.0)
+    trail_atr_mult: float = _f("TRAIL_ATR_MULT", 0.75)
     trail_min_pips: float = _f("TRAIL_MIN_PIPS", 1.5)
 
 

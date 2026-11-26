@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from datafeed import Candle
+from config import PIP
 
 # How long a signal may wait for its entry to fill. Measured on 41 real trades: 40
 # filled within 45 minutes and one at minute 50, so 60 keeps every trade the setup was
@@ -270,6 +271,33 @@ def realized_r(signal: dict, exit_price: float) -> float:
     return round(move / risk, 2)
 
 
+def net_r(signal: dict, exit_price: float) -> float:
+    """The result in R as the account would show it, spread included.
+
+    One function for the live bot and the backtest, because they used to disagree:
+    the backtest charged the spread twice and printed -1.18R stop-outs, while the live
+    bot printed a clean -1.00R. Two sources of truth for the same trade is worse than
+    either answer.
+
+    1R is an account unit, not a price move: the position is sized from the stop
+    distance, so a stop-out is exactly -1.00R and a break-even exit exactly 0.00R.
+    The spread is a real cost, but a stop caps the loss, so it can only be paid out of
+    what is won. Hence: losses and scratches are exact, wins pay the spread.
+    """
+    gross = realized_r(signal, exit_price)
+    if gross <= 0:
+        return gross
+    entry = entry_price_of(signal)
+    risk_pips = abs(entry - float(signal["stop"])) / PIP
+    try:
+        spread_pips = float(signal.get("spread_at_creation") or 0.0)
+    except (TypeError, ValueError):
+        spread_pips = 0.0
+    if risk_pips <= 0 or spread_pips <= 0:
+        return gross
+    return round(gross - spread_pips / risk_pips, 2)
+
+
 def apply(signal: dict, event: dict, now: datetime) -> dict:
     updated = dict(signal)
     updated["status"] = event["status"]
@@ -283,7 +311,11 @@ def apply(signal: dict, event: dict, now: datetime) -> dict:
     }
     if event["status"] in TERMINAL:
         updated["resolved_at"] = datetime.fromtimestamp(event["ts"], tz=timezone.utc).isoformat() if event["ts"] > 1e9 else now.isoformat()
-        updated["r_result"] = 0.0 if event["status"] == "CANCELLED" else realized_r(signal, event["price"])
+        # net_r, not realized_r: the journal, the dashboard and the report must agree
+        # with the backtest, and until 2.7.6 they did not - the live bot booked a clean
+        # -1.00R while the backtest booked -1.18R for the same kind of stop. Now both
+        # use one function: losses exact, wins pay the spread.
+        updated["r_result"] = 0.0 if event["status"] == "CANCELLED" else net_r(signal, event["price"])
     return updated
 
 
