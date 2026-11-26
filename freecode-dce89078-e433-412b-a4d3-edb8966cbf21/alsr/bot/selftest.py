@@ -648,18 +648,15 @@ def test_live_and_backtest_book_the_same_result() -> tuple[bool, str]:
 
     The check runs the same signal through both paths and requires the same answer,
     for a loser, a scratch and a winner.
+
+    It reads tools/backtest.py when that folder exists (a local checkout) and skips
+    that half otherwise. Render runs from alsr/ only, so /health was reporting 2.7.6
+    while this test failed there with "No such file or directory" - a test that depends
+    on a developer folder should not fail on the server. The arithmetic half still runs
+    everywhere, so the R accounting stays pinned in production too.
     """
-    import importlib.util
     from pathlib import Path
     from lifecycle import net_r
-
-    spec = importlib.util.spec_from_file_location(
-        "bt_agree", Path(__file__).resolve().parent.parent / "tools" / "backtest.py")
-    if spec is None:
-        return False, "не вдалось завантажити tools/backtest.py"
-    bt = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bt)
-    src = Path(bt.__file__).read_text(encoding="utf-8")
 
     created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
     sig = _signal(status="ACTIVE", created_at=created.isoformat(), stop=1.0985,
@@ -671,12 +668,22 @@ def test_live_and_backtest_book_the_same_result() -> tuple[bool, str]:
     scratch = net_r(sig, 1.1005)
     win = net_r(sig, 1.1045)
 
-    # The replay must call the very same function; a hand-written spread subtraction
-    # in backtest.py is exactly the bug being pinned.
-    uses_same = 'net_r(open_signal' in src
+    replay = Path(__file__).resolve().parent.parent / "tools" / "backtest.py"
+    if replay.exists():
+        src = replay.read_text(encoding="utf-8")
+        # The replay must call the very same function; a hand-written spread
+        # subtraction in backtest.py is exactly the bug being pinned.
+        uses_same = "net_r(open_signal" in src
+        where = "бектест кличе net_r"
+    else:
+        # Server layout: no tools folder. Nothing to inspect, so this half is not
+        # counted as a failure - but the caller still sees it was skipped.
+        uses_same = True
+        where = "tools/ немає (сервер) — звірку з бектестом пропущено"
+
     exact = abs(loss + 1.0) < 1e-9 and abs(scratch) < 1e-9 and 0 < win < 2.0
     ok = uses_same and exact
-    return ok, (f"бектест кличе net_r={uses_same}; збиток {loss:+.2f}, "
+    return ok, (f"{where}={uses_same}; збиток {loss:+.2f}, "
                 f"беззбиток {scratch:+.2f}, виграш +2.00R брутто → {win:+.2f}")
 
 
