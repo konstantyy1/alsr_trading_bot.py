@@ -161,7 +161,14 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                 # The window follows the signal's own plan (60-210 min on the card),
                 # not a hardcoded 45: on 41 real trades one entry filled at minute 50,
                 # and a fixed 45 would have thrown that trade away.
-                if clock(c) - created_dt > timedelta(minutes=ENTRY_WAIT_MIN):
+                #
+                # The deadline is measured on BAR time, never on the scan clock. The
+                # scan clock is always later than every bar in the replay, so a scan
+                # that happened to arrive late made the very first bar look older than
+                # 60 minutes and cancelled a signal whose price was already inside the
+                # zone. In the 59-day replay that silently killed 12 of 21 "never
+                # filled" signals - the entry was there, the clock said otherwise.
+                if datetime.fromtimestamp(c.t + 300, tz=timezone.utc) - created_dt > timedelta(minutes=ENTRY_WAIT_MIN):
                     # The recorded time is the moment the window was judged closed, not
                     # the close of the bar that happened to be last in the feed. With a
                     # stale feed those differ a lot: 20261125-106B was created at 08:20,
@@ -248,6 +255,22 @@ def evaluate_signal(signal: dict, m5: list[Candle], now: datetime | None = None)
                     if trail_price < stop:
                         clamped = max(trail_price, c.c)
                         stop = clamped if clamped < stop - 1e-9 else stop
+
+    if state == "READY":
+        # The loop can end with the signal still waiting when the feed has no more
+        # bars inside the window - a quiet market, or a replay that stops there. The
+        # window still has to close, otherwise a signal with no touch would sit
+        # "READY" forever and block every later setup. This runs only after every bar
+        # has had its chance, so it can never short-circuit a touch that did happen.
+        cutoff = now if isinstance(now, datetime) else datetime.fromtimestamp(
+            (relevant[-1].t + 300) if relevant else int(created_dt.timestamp()), tz=timezone.utc)
+        if cutoff - created_dt > timedelta(minutes=ENTRY_WAIT_MIN):
+            return {"event": {"status": "CANCELLED", "price": signal["trigger"],
+                              "ts": int(cutoff.timestamp()),
+                              "note": (f"Ціна не зайшла в зону входу за {ENTRY_WAIT_MIN} хв — "
+                                       f"входу не було, угода не відкривалась."),
+                              "exit_kind": "NO_ENTRY", "r_at_exit": 0.0},
+                    "stop": stop, "best_r": best_r, "kind": "SL", "moved": False}
 
     return {"event": None, "stop": stop, "best_r": best_r,
             "kind": _exit_kind(stop, entry, original_stop), "moved": stop != original_stop,

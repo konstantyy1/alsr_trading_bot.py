@@ -182,6 +182,33 @@ def test_lifecycle_ambiguous_candle() -> tuple[bool, str]:
     return ok, event["status"] + " (conservative)" if event else "no event"
 
 
+def test_lifecycle_late_scan_still_fills() -> tuple[bool, str]:
+    """A late scan must not cancel a signal whose price already touched the zone.
+
+    This was a real defect, not a hypothetical one. The window was measured on the
+    scan clock, which is always later than every replayed bar, so the first bar could
+    look older than 60 minutes before it was ever examined. In the 59-day replay it
+    cancelled 12 signals whose entry had already been touched - the journal showed
+    "price never reached the zone" while the bars showed it 10 pips inside.
+    """
+    from lifecycle import ENTRY_WAIT_MIN
+
+    base = _signal()  # BUY, zone 1.0995–1.1005
+    # Bar 1 misses the zone, bar 2 touches it (low 1.1000 is inside 1.0995–1.1005).
+    bars = [_c(T0, 1.1010, 1.1014, 1.1008, 1.1012),
+            _c(T0 + 300, 1.1010, 1.1012, 1.1000, 1.1002)]
+    created = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
+
+    # Same bars, only the scan moment differs: prompt vs well past the window.
+    prompt = evaluate_signal(base, bars, created + timedelta(minutes=10))
+    stale = evaluate_signal(base, bars, created + timedelta(minutes=ENTRY_WAIT_MIN + 30))
+    ok = (prompt["event"] is None and prompt.get("filled") is not None
+          and stale["event"] is None and stale.get("filled") is not None)
+    return ok, (f"скан +10 хв: вхід={prompt.get('filled') is not None}, "
+                f"скан +{ENTRY_WAIT_MIN + 30} хв: вхід={stale.get('filled') is not None}, "
+                f"подія={stale['event']['status'] if stale['event'] else 'немає'}")
+
+
 def test_lifecycle_cancel() -> tuple[bool, str]:
     # The entry window is ENTRY_WAIT_MIN (60), so a scan at exactly 60 minutes must
     # still be waiting; a little later the signal is closed as never filled.
@@ -1630,6 +1657,7 @@ TESTS = [
     ("Lifecycle: TP1", test_lifecycle_tp1),
     ("Lifecycle: ambiguous candle → SL", test_lifecycle_ambiguous_candle),
     ("Lifecycle: cancel when entry not triggered", test_lifecycle_cancel),
+    ("Lifecycle: late scan still honours a touched entry", test_lifecycle_late_scan_still_fills),
     ("Lifecycle: max hold expiry", test_lifecycle_expiry),
     ("Lifecycle: ignore open bar", test_lifecycle_ignores_incomplete_bar),
     ("H4 aggregation", test_h4_aggregation),
